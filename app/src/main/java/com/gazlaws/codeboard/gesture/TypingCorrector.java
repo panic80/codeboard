@@ -22,16 +22,22 @@ public final class TypingCorrector {
     private static final int MAX_INPUT_LENGTH = 48;
     private static final int MAX_KEY_LENGTH = 64;
     private static final int MAX_RESULTS = 32;
+    private static final double FREQUENCY_WEIGHT = 0.18;
+    private static final double SHORT_WORD_FREQUENCY_WEIGHT = 1.9;
 
     /** The typed text is the first candidate. A correction is present only when confidence is high. */
     public static final class Result {
         public final List<String> candidates;
         public final String correction;
+        /** The highest-ranked eligible alternative, even when it is not a confident correction. */
+        public final String bestSuggestion;
         public final boolean exactWord;
 
-        private Result(List<String> candidates, String correction, boolean exactWord) {
+        private Result(List<String> candidates, String correction, String bestSuggestion,
+                       boolean exactWord) {
             this.candidates = Collections.unmodifiableList(candidates);
             this.correction = correction;
+            this.bestSuggestion = bestSuggestion;
             this.exactWord = exactWord;
         }
     }
@@ -126,25 +132,25 @@ public final class TypingCorrector {
      */
     public Result suggest(String typed, int limit) {
         ArrayList<String> candidates = new ArrayList<>();
-        if (typed == null || typed.isEmpty()) return new Result(candidates, null, false);
+        if (typed == null || typed.isEmpty()) return new Result(candidates, null, null, false);
         String normalized = normalize(typed, korean);
         Word exactEntry = normalized == null ? null : exactWords.get(normalized);
         boolean exact = exactEntry != null;
-        if (limit <= 0) return new Result(candidates, null, exact);
+        if (limit <= 0) return new Result(candidates, null, null, exact);
         candidates.add(typed);
         if (exact) {
             CaseStyle style = korean ? CaseStyle.LOWER : caseStyle(typed);
             String canonical = display(exactEntry.text, style, typed);
             if (limit > 1 && !canonical.equals(typed)) candidates.add(canonical);
-            return new Result(candidates, null, true);
+            return new Result(candidates, null, null, true);
         }
         if (normalized == null || normalized.length() > MAX_INPUT_LENGTH) {
-            return new Result(candidates, null, exact);
+            return new Result(candidates, null, null, exact);
         }
         CaseStyle style = korean ? CaseStyle.LOWER : caseStyle(typed);
         String keys = keysFor(normalized, korean);
         if (keys == null || keys.isEmpty() || keys.length() > MAX_KEY_LENGTH) {
-            return new Result(candidates, null, false);
+            return new Result(candidates, null, null, false);
         }
 
         // Short words are especially ambiguous; distance two is useful only on longer tokens.
@@ -156,14 +162,40 @@ public final class TypingCorrector {
             search(child, keys, maxEdits, initial, null, '\0', matches);
         }
         Collections.sort(matches, MATCH_ORDER);
+        // Preserve the conservative decision while ranking short English suggestions with a
+        // stronger frequency prior: one edit in three letters offers little spelling evidence.
+        String correction = confidentCorrection(normalized, keys, typed, style, matches);
+        if (!korean && letterCount(normalized) == 3) {
+            double extraWeight = SHORT_WORD_FREQUENCY_WEIGHT - FREQUENCY_WEIGHT;
+            Collections.sort(matches, (a, b) -> {
+                double scoreA = a.score - extraWeight * Math.log1p(a.word.frequency) / frequencyScale;
+                double scoreB = b.score - extraWeight * Math.log1p(b.word.frequency) / frequencyScale;
+                int order = Double.compare(scoreA, scoreB);
+                return order != 0 ? order : MATCH_ORDER.compare(a, b);
+            });
+        }
         int count = Math.min(Math.min(limit, MAX_RESULTS), matches.size() + 1);
         for (Match match : matches) {
             if (candidates.size() >= count) break;
             String shown = display(match.word.text, style, typed);
             if (!shown.equals(typed) && !candidates.contains(shown)) candidates.add(shown);
         }
-        String correction = confidentCorrection(normalized, keys, typed, style, matches);
-        return new Result(candidates, correction, false);
+        String bestSuggestion = topSuggestion(normalized, typed, style, matches);
+        return new Result(candidates, correction, bestSuggestion, false);
+    }
+
+    private String topSuggestion(String normalized, String typed, CaseStyle style,
+                                 List<Match> matches) {
+        if (matches.isEmpty() || style == CaseStyle.UPPER || style == CaseStyle.MIXED) return null;
+        Match best = matches.get(0);
+        if (korean) {
+            // Only complete Korean words of at least three syllables can be replaced.
+            if (countSyllables(normalized) < 3 || !onlySyllables(normalized)
+                    || countSyllables(best.word.text) < 3 || !onlySyllables(best.word.text)) return null;
+        } else if (letterCount(normalized) <= 2) {
+            return null;
+        }
+        return display(best.word.text, style, typed);
     }
 
     private String confidentCorrection(String normalized, String keys, String typed,
@@ -215,7 +247,7 @@ public final class TypingCorrector {
             for (int terminal = terminals[node]; terminal != 0; terminal = nextWords[terminal - 1]) {
                 Word word = words[terminal - 1];
                 double editCost = weightedDistance(input, word.keys);
-                double frequencyBonus = 0.18 * Math.log1p(word.frequency) / frequencyScale;
+                double frequencyBonus = FREQUENCY_WEIGHT * Math.log1p(word.frequency) / frequencyScale;
                 matches.add(new Match(word, current[input.length()], editCost - frequencyBonus));
             }
         }

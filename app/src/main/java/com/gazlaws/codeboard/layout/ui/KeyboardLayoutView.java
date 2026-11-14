@@ -27,6 +27,8 @@ public class KeyboardLayoutView extends ViewGroup {
 
     private boolean swipeEnabled;
     private boolean ctrlPressed;
+    // A per-orientation override is supplied by the IME. Null keeps the theme default.
+    private Integer keyboardHeightPercent;
     private SwipeGesture.Listener swipeListener;
     private KeyboardButtonView startButton;
     private int activePointerId = MotionEvent.INVALID_POINTER_ID;
@@ -58,6 +60,28 @@ public class KeyboardLayoutView extends ViewGroup {
         if (!enabled || listener == null) cancelActiveGesture();
     }
 
+    /** Enables spacebar cursor movement without changing other keys. */
+    public void setCursorControlEnabled(boolean enabled) {
+        for (KeyboardButtonView button : getKeyboardButtons()) {
+            button.setCursorControlEnabled(enabled);
+        }
+    }
+
+    /** Sets the desired keyboard height as a percentage of the screen height. */
+    public void setKeyboardHeightPercent(int percent) {
+        int clampedPercent = Math.max(1, Math.min(100, percent));
+        if (keyboardHeightPercent != null && keyboardHeightPercent == clampedPercent) return;
+        keyboardHeightPercent = clampedPercent;
+        requestLayout();
+    }
+
+    /** Returns to the orientation-specific height supplied by the theme. */
+    public void clearKeyboardHeightOverride() {
+        if (keyboardHeightPercent == null) return;
+        keyboardHeightPercent = null;
+        requestLayout();
+    }
+
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         DisplayMetrics metrics = getContext().getResources().getDisplayMetrics();
@@ -65,6 +89,7 @@ public class KeyboardLayoutView extends ViewGroup {
         int availableWidth = metrics.widthPixels;
         float keyboardSize = availableHeight > availableWidth
                 ? uiTheme.portraitSize : uiTheme.landscapeSize;
+        if (keyboardHeightPercent != null) keyboardSize = keyboardHeightPercent / 100f;
         int width = resolveSize(availableWidth, widthMeasureSpec);
         int height = resolveSize((int) (availableHeight * keyboardSize), heightMeasureSpec);
         setMeasuredDimension(width, height);

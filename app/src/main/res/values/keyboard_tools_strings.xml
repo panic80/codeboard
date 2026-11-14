@@ -1,0 +1,34 @@
+<resources>
+    <string name="keyboard_tools_emoji">Emoji</string>
+    <string name="keyboard_tools_clipboard">Clipboard</string>
+    <string name="keyboard_tools_voice">Voice</string>
+    <string name="keyboard_tools_resize">Resize</string>
+    <string name="keyboard_tools_language">Language</string>
+    <string name="keyboard_tools_settings">Settings</string>
+    <string name="emoji_category_recent">Recent</string>
+    <string name="emoji_category_faces">Faces</string>
+    <string name="emoji_category_hearts">Hearts</string>
+    <string name="emoji_category_food">Food</string>
+    <string name="emoji_category_flags">Flags</string>
+    <string name="emoji_recent_empty">Recently used emoji appear here</string>
+    <string name="emoji_backspace">Delete</string>
+    <string name="emoji_backspace_description">Delete previous character</string>
+    <string name="emoji_done">Done</string>
+    <string name="voice_input_unavailable">Voice typing unavailable</string>
+    <item name="keyboard_tools_emoji" type="id" />
+    <item name="keyboard_tools_clipboard" type="id" />
+    <item name="keyboard_tools_voice" type="id" />
+    <item name="keyboard_tools_resize" type="id" />
+    <item name="keyboard_tools_language" type="id" />
+    <item name="keyboard_tools_settings" type="id" />
+    <item name="emoji_categories_scroll" type="id" />
+    <item name="emoji_category_recent" type="id" />
+    <item name="emoji_category_faces" type="id" />
+    <item name="emoji_category_hearts" type="id" />
+    <item name="emoji_category_food" type="id" />
+    <item name="emoji_category_flags" type="id" />
+    <item name="emoji_grid" type="id" />
+    <item name="emoji_recent_empty" type="id" />
+    <item name="emoji_backspace" type="id" />
+    <item name="emoji_done" type="id" />
+</resources>

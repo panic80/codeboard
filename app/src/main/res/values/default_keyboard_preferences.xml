@@ -4,6 +4,10 @@
     <bool name="swipe_typing">true</bool>
     <bool name="auto_correction">true</bool>
     <bool name="spelling_suggestions">true</bool>
+    <bool name="use_top_suggestion">true</bool>
+    <bool name="auto_capitalization">true</bool>
+    <bool name="double_space_period">true</bool>
+    <bool name="cursor_control">true</bool>
     <bool name="vibrate">true</bool>
     <bool name="preview">false</bool>
     <bool name="borders">true</bool>

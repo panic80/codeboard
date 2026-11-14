@@ -20,6 +20,9 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.ResultReceiver;
+import android.os.SystemClock;
+import androidx.preference.PreferenceManager;
+import android.widget.Toast;
 import android.os.Vibrator;
 import android.text.InputType;
 import android.util.Log;
@@ -39,6 +42,7 @@ import androidx.core.app.RemoteInput;
 import androidx.core.graphics.ColorUtils;
 
 import com.gazlaws.codeboard.input.HangulComposer;
+import com.gazlaws.codeboard.input.TypingConveniences;
 import com.gazlaws.codeboard.input.KoreanKeyMap;
 import com.gazlaws.codeboard.gesture.SwipeDecoder;
 import com.gazlaws.codeboard.gesture.SwipeTypingController;
@@ -52,6 +56,10 @@ import com.gazlaws.codeboard.layout.ui.KeyboardLayoutView;
 import com.gazlaws.codeboard.layout.ui.KeyboardUiFactory;
 import com.gazlaws.codeboard.layout.ui.SwipeGesture;
 import com.gazlaws.codeboard.layout.ui.SuggestionStripView;
+import com.gazlaws.codeboard.layout.ui.ResizableInputView;
+import com.gazlaws.codeboard.layout.ui.KeyboardResizeView;
+import com.gazlaws.codeboard.layout.ui.KeyboardToolsView;
+import com.gazlaws.codeboard.layout.ui.EmojiPickerView;
 import com.gazlaws.codeboard.theme.ThemeDefinitions;
 import com.gazlaws.codeboard.theme.ThemeInfo;
 
@@ -97,11 +105,27 @@ public class CodeBoardIME extends InputMethodService
     private SwipeTypingController swipeTypingController;
     private AutoCorrectController autoCorrectController;
     private SuggestionStripView swipeSuggestions;
+    private ResizableInputView inputContainer;
+    private View auxiliaryPanel;
+    private VoiceInputBridge voiceInputBridge;
+    private boolean autoCapitalizationEnabled;
+    private boolean doubleSpacePeriodEnabled;
+    private boolean manualShift;
+    private boolean capitalizationSuppressed;
+    private boolean cursorDragging;
+    private long longPressGeneration;
+    private final TypingConveniences typingConveniences = new TypingConveniences();
+    private int lastSpaceCursor = -1;
 
     @Override
     public void onKey(int primaryCode, int[] KeyCodes) {
+        if (voiceInputBridge != null) voiceInputBridge.onManualInput();
         final int originalCode = primaryCode;
         if (deferPendingInput(() -> onKey(originalCode, KeyCodes))) return;
+        if (primaryCode != 32) {
+            typingConveniences.clear();
+            lastSpaceCursor = -1;
+        }
         //NOTE: Long press goes second, this is onDown
         InputConnection ic = getCurrentInputConnection();
         if (ic == null) {
@@ -115,7 +139,7 @@ public class CodeBoardIME extends InputMethodService
                 && !ctrl;
         if (koreanKey != 0) primaryCode = koreanKey;
         if (autoCorrectController != null && primaryCode != 16 && primaryCode != 32
-                && primaryCode != -5 && (!typingAssistAvailable || primaryCode < 32 || primaryCode > 126)) {
+                && primaryCode != -5 && primaryCode != -1 && (!typingAssistAvailable || primaryCode < 32 || primaryCode > 126)) {
             autoCorrectController.cancel();
             if (primaryCode != 17 && primaryCode != -1
                     && primaryCode != Definitions.CODE_LANGUAGE_SWITCH) {
@@ -135,11 +159,25 @@ public class CodeBoardIME extends InputMethodService
         Log.d(getClass().getSimpleName(), "onKey: " + primaryCode);
 
         switch (primaryCode) {
+            case Definitions.CODE_CURSOR_DRAG_START:
+                cursorDragging = true;
+                clearLongPressTimer();
+                break;
+            case Definitions.CODE_CURSOR_DRAG_END:
+                cursorDragging = false;
+                consumeShift(ic);
+                break;
+            case Definitions.CODE_TOOLS:
+                showTools();
+                break;
+            case Definitions.CODE_RESIZE:
+                showResize();
+                break;
             //First handle cases that  don't use shift/ctrl meta modifiers
             case Definitions.CODE_LANGUAGE_SWITCH:
                 if (koreanLayoutSelected) {
                     koreanMode = !koreanMode;
-                    shift = shiftLock = false;
+                    shift = shiftLock = manualShift = false;
                     ctrl = ctrlLock = false;
                     ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT));
                     ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_CTRL_LEFT));
@@ -167,7 +205,8 @@ public class CodeBoardIME extends InputMethodService
                 ic.performContextMenuAction(android.R.id.redo);
                 break;
             case -1:
-                //SYM
+                // Preserve an email token while opening the punctuation page.
+                if (autoCorrectController != null) autoCorrectController.onKeyboardPageChanged();
                 if (mKeyboardState == R.integer.keyboard_normal && !ctrl) {
                     mKeyboardState = R.integer.keyboard_sym;
                 } else if (ctrl) {
@@ -175,6 +214,7 @@ public class CodeBoardIME extends InputMethodService
                 } else {
                     mKeyboardState = R.integer.keyboard_normal;
                 }
+                manualShift = false;
                 // regenerate view
                 //Simple remove shift
                 if (shift) {
@@ -210,6 +250,8 @@ public class CodeBoardIME extends InputMethodService
                 break;
 
             case 16: //KEYCODE_SHIFT_LEFT
+                capitalizationSuppressed = shift;
+                manualShift = !shift;
                 // emulates press of shift key - this helps for selection with arrow keys
                 if (!shiftLock && !shift) {
                     //Simple shift to true
@@ -231,7 +273,8 @@ public class CodeBoardIME extends InputMethodService
                 if (shift) {
                     meta = KeyEvent.META_SHIFT_ON;
                     code = Character.toUpperCase(code);
-                    if (!shiftLock) {
+                    if (!shiftLock && primaryCode != 32 && !cursorDragging) {
+                        manualShift = false;
                         shift = false;
                         ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT));
                         shiftKeyUpdateView();
@@ -291,6 +334,17 @@ public class CodeBoardIME extends InputMethodService
                         ic.commitText(String.valueOf(code), 1);
                         if (Character.isLetter(code)) autoCorrectController.onTypedTextUpdated(false);
                         else autoCorrectController.onNonLetterTyped();
+                        break;
+                    }
+                }
+                if ((autoCapitalizationEnabled || doubleSpacePeriodEnabled) && isOrdinaryTypingField()
+                        && (meta & KeyEvent.META_CTRL_ON) == 0 && !typingAssistAvailable) {
+                    if (primaryCode >= 33 && primaryCode <= 126) {
+                        ic.commitText(String.valueOf(code), 1);
+                        break;
+                    }
+                    if (primaryCode == -5) {
+                        deleteTypedCharacter(ic);
                         break;
                     }
                 }
@@ -419,6 +473,10 @@ public class CodeBoardIME extends InputMethodService
                 }
             }
         }
+        if ((primaryCode >= 33 && primaryCode <= 126) || primaryCode == -5 || primaryCode == -4) {
+            capitalizationSuppressed = false;
+            updateAutomaticShift();
+        }
         refreshSuggestionHint();
     }
 
@@ -439,6 +497,7 @@ public class CodeBoardIME extends InputMethodService
         }
 
         clearLongPressTimer();
+        final long generation = longPressGeneration;
         timerLongPress = new Timer();
         timerLongPress.schedule(new TimerTask() {
             @Override
@@ -449,7 +508,8 @@ public class CodeBoardIME extends InputMethodService
                         @Override
                         public void run() {
                             try {
-                                CodeBoardIME.this.onKeyLongPress(primaryCode);
+                                if (generation == longPressGeneration)
+                                    CodeBoardIME.this.onKeyLongPress(primaryCode);
                             } catch (Exception e) {
                                 Log.e(getClass().getSimpleName(), "uiHandler.run: " + e.getMessage(), e);
                             }
@@ -478,6 +538,7 @@ public class CodeBoardIME extends InputMethodService
 
     @Override
     public void onWindowHidden() {
+        if (voiceInputBridge != null) voiceInputBridge.onEditorUnavailable();
         cancelTypingState();
         finishKoreanComposition(getCurrentInputConnection());
         super.onWindowHidden();
@@ -511,6 +572,10 @@ public class CodeBoardIME extends InputMethodService
             if (ic != null) {
                 if (swipeTypingController != null) swipeTypingController.finish(ic, false);
                 finishKoreanComposition(ic);
+                if (tryDoubleSpace(ic)) {
+                    clearLongPressTimer();
+                    return;
+                }
                 if (!isTypingAssistAvailable() || autoCorrectController == null
                         || !autoCorrectController.commitSpace()) {
                     boolean trackSpace = isTypingAssistAvailable() && autoCorrectController != null;
@@ -522,6 +587,14 @@ public class CodeBoardIME extends InputMethodService
                         else autoCorrectController.invalidateEditorPosition();
                     }
                 }
+                if (isOrdinaryTypingField()) {
+                    typingConveniences.recordSpace(SystemClock.uptimeMillis());
+                    CharSequence before = ic.getTextBeforeCursor(1, 0);
+                    lastSpaceCursor = before == null || !before.toString().equals(" ")
+                            ? -1 : verifiedEditorCursor();
+                }
+                consumeShift(ic);
+                updateAutomaticShift();
             }
         }
 
@@ -577,6 +650,9 @@ public class CodeBoardIME extends InputMethodService
     }
 
     public void onText(CharSequence text) {
+        if (voiceInputBridge != null) voiceInputBridge.onManualInput();
+        typingConveniences.clear();
+        lastSpaceCursor = -1;
         String value = text.toString();
         if (deferPendingInput(() -> onText(value))) return;
         InputConnection ic = getCurrentInputConnection();
@@ -634,6 +710,9 @@ public class CodeBoardIME extends InputMethodService
         swipeTypingEnabled = sharedPreferences.isSwipeTypingEnabled();
         autoCorrectEnabled = sharedPreferences.isAutoCorrectEnabled();
         spellingSuggestionsEnabled = sharedPreferences.isSpellingSuggestionsEnabled();
+        autoCapitalizationEnabled = sharedPreferences.isAutoCapitalizationEnabled();
+        doubleSpacePeriodEnabled = sharedPreferences.isDoubleSpacePeriodEnabled();
+        auxiliaryPanel = null;
         mKeyboardUiFactory.theme.enablePreview = sharedPreferences.isPreviewEnabled();
         mKeyboardUiFactory.theme.enableBorder = sharedPreferences.isBorderEnabled();
         mKeyboardUiFactory.theme.fontSize = sharedPreferences.getFontSizeAsSp();
@@ -756,6 +835,9 @@ public class CodeBoardIME extends InputMethodService
 
             Collection<Key> keyboardLayout = builder.build();
             mCurrentKeyboardLayoutView = mKeyboardUiFactory.createKeyboardView(this, keyboardLayout);
+            boolean landscape = isLandscape();
+            mCurrentKeyboardLayoutView.setKeyboardHeightPercent(landscape ? sizeLandscape : mSize);
+            mCurrentKeyboardLayoutView.setCursorControlEnabled(sharedPreferences.isCursorControlEnabled());
             if (swipeTypingEnabled || spellingSuggestionsEnabled || autoCorrectEnabled) {
                 if (swipeTypingController == null) {
                     swipeTypingController = new SwipeTypingController(this,
@@ -780,6 +862,9 @@ public class CodeBoardIME extends InputMethodService
                         created = true;
                     }
                     autoCorrectController.setAutoCorrectionEnabled(autoCorrectEnabled);
+                    autoCorrectController.setUseTopSuggestion(sharedPreferences.useTopSuggestion());
+                    autoCorrectController.setEmailOnly(sEditorInfo != null
+                            && supportsEmailLiteralInputType(sEditorInfo.inputType));
                     autoCorrectController.setSuggestionStrip(spellingSuggestionsEnabled ? swipeSuggestions : null);
                     if (created) seedTypingAssistEditor();
                 } else if (autoCorrectController != null) {
@@ -798,14 +883,12 @@ public class CodeBoardIME extends InputMethodService
             controlKeyUpdateView();
             shiftKeyUpdateView();
             updateSwipeAvailability();
-            if (swipeSuggestions == null) return mCurrentKeyboardLayoutView;
-            LinearLayout container = new LinearLayout(this);
-            container.setOrientation(LinearLayout.VERTICAL);
-            container.addView(swipeSuggestions, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-            container.addView(mCurrentKeyboardLayoutView, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-            return container;
+            inputContainer = new ResizableInputView(this);
+            inputContainer.setKeyboardWidthPercent(sharedPreferences.getKeyboardWidth(landscape));
+            if (swipeSuggestions != null) inputContainer.addKeyboardView(swipeSuggestions);
+            inputContainer.addKeyboardView(mCurrentKeyboardLayoutView);
+            updateAutomaticShift();
+            return inputContainer;
 
         } catch (KeyboardLayoutException e) {
             e.printStackTrace();
@@ -824,6 +907,7 @@ public class CodeBoardIME extends InputMethodService
         super.onStartInputView(attribute, restarting);
         sEditorInfo = attribute;
         setInputView(onCreateInputView());
+        notifyVoiceEditorReady(restarting);
     }
 
     @Override
@@ -832,14 +916,21 @@ public class CodeBoardIME extends InputMethodService
         cancelTypingState();
         finishKoreanComposition(getCurrentInputConnection());
         sEditorInfo = attribute;
+        typingConveniences.clear();
+        lastSpaceCursor = -1;
+        manualShift = capitalizationSuppressed = cursorDragging = false;
+        shift = shiftLock = ctrl = ctrlLock = false;
         editorSelectionStart = attribute.initialSelStart;
         editorSelectionEnd = attribute.initialSelEnd;
         seedTypingAssistEditor();
         updateSwipeAvailability();
+        updateAutomaticShift();
+        notifyVoiceEditorReady(restarting);
     }
 
     @Override
     public void onFinishInputView(boolean finishingInput) {
+        if (voiceInputBridge != null) voiceInputBridge.onEditorUnavailable();
         cancelTypingState();
         finishKoreanComposition(getCurrentInputConnection());
         super.onFinishInputView(finishingInput);
@@ -847,6 +938,7 @@ public class CodeBoardIME extends InputMethodService
 
     @Override
     public void onFinishInput() {
+        if (voiceInputBridge != null) voiceInputBridge.onEditorUnavailable();
         cancelTypingState();
         finishKoreanComposition(getCurrentInputConnection());
         clearLongPressTimer();
@@ -858,6 +950,7 @@ public class CodeBoardIME extends InputMethodService
                                   int newSelEnd, int candidatesStart, int candidatesEnd) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd,
                 candidatesStart, candidatesEnd);
+        if (voiceInputBridge != null) voiceInputBridge.onSelectionChanged(newSelStart, newSelEnd);
         editorSelectionStart = newSelStart;
         editorSelectionEnd = newSelEnd;
         if (swipeTypingController != null) {
@@ -865,7 +958,7 @@ public class CodeBoardIME extends InputMethodService
                     newSelStart, newSelEnd, candidatesEnd);
         }
         if (autoCorrectController != null) {
-            if (sEditorInfo != null && supportsAutoCorrectInputType(sEditorInfo.inputType)
+            if (sEditorInfo != null && supportsTypingAssistInputType(sEditorInfo.inputType)
                     && (spellingSuggestionsEnabled || autoCorrectEnabled)) {
                 autoCorrectController.onSelectionChanged(oldSelStart, oldSelEnd,
                         newSelStart, newSelEnd, candidatesEnd);
@@ -873,6 +966,9 @@ public class CodeBoardIME extends InputMethodService
                 autoCorrectController.invalidateEditorPosition();
             }
         }
+        reconcileFirstSpaceCursor();
+        updateAutomaticShift();
+        notifyVoiceEditorReady(false);
         if (hangulComposer.hasComposition()
                 && (newSelStart != candidatesEnd || newSelEnd != candidatesEnd)) {
             finishKoreanComposition(getCurrentInputConnection());
@@ -915,14 +1011,16 @@ public class CodeBoardIME extends InputMethodService
 
     private boolean isTypingAssistAvailable() {
         return (spellingSuggestionsEnabled || autoCorrectEnabled) && autoCorrectController != null && !ctrl
-                && mKeyboardState == R.integer.keyboard_normal && sEditorInfo != null
-                && supportsAutoCorrectInputType(sEditorInfo.inputType);
+                && mKeyboardState != R.integer.keyboard_clipboard && sEditorInfo != null
+                && supportsTypingAssistInputType(sEditorInfo.inputType);
     }
 
     private void seedTypingAssistEditor() {
         if (autoCorrectController == null) return;
         boolean allowed = (spellingSuggestionsEnabled || autoCorrectEnabled)
-                && sEditorInfo != null && supportsAutoCorrectInputType(sEditorInfo.inputType);
+                && sEditorInfo != null && supportsTypingAssistInputType(sEditorInfo.inputType);
+        autoCorrectController.setEmailOnly(sEditorInfo != null
+                && supportsEmailLiteralInputType(sEditorInfo.inputType));
         autoCorrectController.onStartInput(allowed ? getCurrentInputConnection() : null,
                 allowed ? editorSelectionStart : -1, allowed ? editorSelectionEnd : -1);
     }
@@ -931,12 +1029,247 @@ public class CodeBoardIME extends InputMethodService
         if (swipeSuggestions == null) return;
         if (!spellingSuggestionsEnabled) {
             swipeSuggestions.setHintText(getString(R.string.spelling_suggestions_disabled_hint));
-        } else if (sEditorInfo != null && !supportsAutoCorrectInputType(sEditorInfo.inputType)) {
+        } else if (sEditorInfo != null && !supportsTypingAssistInputType(sEditorInfo.inputType)) {
             swipeSuggestions.setHintText(getString(R.string.spelling_suggestions_unavailable_hint));
         } else {
             swipeSuggestions.setHintText(getString(swipeTypingEnabled
                     ? R.string.swipe_and_type_suggestions_hint : R.string.type_suggestions_hint));
         }
+    }
+
+    private static boolean supportsTypingAssistInputType(int inputType) {
+        return supportsAutoCorrectInputType(inputType) || supportsEmailLiteralInputType(inputType);
+    }
+
+    static boolean supportsEmailLiteralInputType(int inputType) {
+        if ((inputType & InputType.TYPE_MASK_CLASS) != InputType.TYPE_CLASS_TEXT
+                || (inputType & InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS) != 0) return false;
+        int variation = inputType & InputType.TYPE_MASK_VARIATION;
+        return variation == InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+                || variation == InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS;
+    }
+
+    private boolean isOrdinaryTypingField() {
+        return sEditorInfo != null && supportsAutoCorrectInputType(sEditorInfo.inputType)
+                && mKeyboardState == R.integer.keyboard_normal && !ctrl;
+    }
+
+    private boolean isLandscape() {
+        return getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+    }
+
+    private void consumeShift(InputConnection ic) {
+        if (shift && !shiftLock) {
+            shift = manualShift = false;
+            ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT));
+            shiftKeyUpdateView();
+        }
+    }
+
+    private void updateAutomaticShift() {
+        if (manualShift || shiftLock || cursorDragging) return;
+        boolean enabled = autoCapitalizationEnabled && isOrdinaryTypingField()
+                && !(koreanLayoutSelected && koreanMode) && !capitalizationSuppressed
+                && verifiedEditorCursor() >= 0;
+        boolean next = enabled && TypingConveniences.shouldCapitalize(
+                getCurrentInputConnection(), sEditorInfo.inputType);
+        if (next != shift) {
+            shift = next;
+            InputConnection ic = getCurrentInputConnection();
+            if (ic != null) ic.sendKeyEvent(new KeyEvent(next ? KeyEvent.ACTION_DOWN : KeyEvent.ACTION_UP,
+                    KeyEvent.KEYCODE_SHIFT_LEFT));
+            shiftKeyUpdateView();
+        }
+    }
+
+    private void reconcileFirstSpaceCursor() {
+        if (lastSpaceCursor < 0 || verifiedEditorCursor() == lastSpaceCursor) return;
+        int tracked = autoCorrectController == null ? -1 : autoCorrectController.getTrackedSpaceCursorPosition();
+        if (tracked >= 0) lastSpaceCursor = tracked;
+        else {
+            typingConveniences.clear();
+            lastSpaceCursor = -1;
+        }
+    }
+
+    private boolean tryDoubleSpace(InputConnection ic) {
+        reconcileFirstSpaceCursor();
+        if (!doubleSpacePeriodEnabled || !isOrdinaryTypingField()
+                || lastSpaceCursor < 0 || verifiedEditorCursor() != lastSpaceCursor) return false;
+        CharSequence before = ic.getTextBeforeCursor(256, 0);
+        if (before == null || before.length() < 2 || before.charAt(before.length() - 1) != ' ') return false;
+        int end = before.length() - 1;
+        int start = end;
+        while (start > 0 && !Character.isWhitespace(before.charAt(start - 1))) start--;
+        if (start == 0 && before.length() == 256) return false;
+        String token = before.subSequence(start, end).toString();
+        // Natural words only: code, numbers, URLs and email addresses stay literal.
+        if (!token.matches("(?:[a-z]+(?:'[a-z]+)?|[A-Z][a-z]*(?:'[a-z]+)?|[가-힣]+)")) return false;
+        if (autoCorrectController != null) autoCorrectController.beforeManualEdit();
+        boolean replaced = typingConveniences.tryDoubleSpace(ic, SystemClock.uptimeMillis());
+        if (autoCorrectController != null)
+            autoCorrectController.onManualTextReplaced(replaced ? " " : "", replaced ? ". " : "");
+        if (!replaced) return false;
+        lastSpaceCursor = -1;
+        capitalizationSuppressed = false;
+        updateAutomaticShift();
+        return true;
+    }
+
+    private int verifiedEditorCursor() {
+        if (sEditorInfo == null || !supportsTypingAssistInputType(sEditorInfo.inputType)) return -1;
+        if (autoCorrectController != null) return autoCorrectController.getVerifiedCursorPosition();
+        InputConnection ic = getCurrentInputConnection();
+        if (ic == null) return -1;
+        android.view.inputmethod.ExtractedText text = ic.getExtractedText(
+                new android.view.inputmethod.ExtractedTextRequest(), 0);
+        if (text == null || text.selectionStart < 0 || text.selectionStart != text.selectionEnd) return -1;
+        long position = (long) text.startOffset + text.selectionStart;
+        return position >= 0 && position <= Integer.MAX_VALUE ? (int) position : -1;
+    }
+
+    private void notifyVoiceEditorReady(boolean restarting) {
+        if (voiceInputBridge != null) voiceInputBridge.onEditorReady(getCurrentInputConnection(),
+                sEditorInfo, verifiedEditorCursor(), restarting);
+    }
+
+    private void startVoiceInput() {
+        hideAuxiliaryPanel();
+        InputConnection ic = getCurrentInputConnection();
+        finishKoreanComposition(ic);
+        if (swipeTypingController != null && ic != null) swipeTypingController.finish(ic, false);
+        if (voiceInputBridge == null) voiceInputBridge = new VoiceInputBridge(this, new VoiceInputBridge.Listener() {
+            @Override public InputConnection getCurrentInputConnection() { return CodeBoardIME.this.getCurrentInputConnection(); }
+            @Override public void onVoiceText(String text) {
+                cancelTypingState();
+                onText(text);
+            }
+        });
+        if (!voiceInputBridge.launch(ic, sEditorInfo, verifiedEditorCursor(), koreanLayoutSelected && koreanMode)) {
+            Toast.makeText(this, R.string.voice_unavailable_in_field, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void hideAuxiliaryPanel() {
+        if (inputContainer == null) return;
+        if (auxiliaryPanel != null) inputContainer.removeView(auxiliaryPanel);
+        auxiliaryPanel = null;
+        if (mCurrentKeyboardLayoutView != null) mCurrentKeyboardLayoutView.setVisibility(View.VISIBLE);
+        updateSwipeAvailability();
+    }
+
+    private void showTools() {
+        if (inputContainer == null) return;
+        if (auxiliaryPanel instanceof KeyboardToolsView) {
+            hideAuxiliaryPanel();
+            return;
+        }
+        hideAuxiliaryPanel();
+        cancelTypingState();
+        auxiliaryPanel = new KeyboardToolsView(this, mKeyboardUiFactory.theme, action -> {
+            switch (action) {
+                case EMOJI: showEmoji(); break;
+                case RESIZE: showResize(); break;
+                case CLIPBOARD:
+                    mKeyboardState = R.integer.keyboard_clipboard;
+                    setInputView(onCreateInputView());
+                    break;
+                case LANGUAGE:
+                    if (!koreanLayoutSelected) {
+                        PreferenceManager.getDefaultSharedPreferences(this).edit()
+                                .putString("layout", String.valueOf(Definitions.LAYOUT_KOREAN)).apply();
+                        koreanMode = true;
+                        mKeyboardState = R.integer.keyboard_normal;
+                        setInputView(onCreateInputView());
+                    } else onKey(Definitions.CODE_LANGUAGE_SWITCH, null);
+                    break;
+                case SETTINGS:
+                    startActivity(new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    break;
+                case VOICE: startVoiceInput(); break;
+            }
+        });
+        inputContainer.addKeyboardView(auxiliaryPanel, 0);
+    }
+
+    private void applyKeyboardSize(int height, int width) {
+        new KeyboardPreferences(this).setKeyboardSize(isLandscape(), height, width);
+        mCurrentKeyboardLayoutView.setKeyboardHeightPercent(height);
+        inputContainer.setKeyboardWidthPercent(width);
+    }
+
+    private void showResize() {
+        if (inputContainer == null) return;
+        hideAuxiliaryPanel();
+        KeyboardPreferences prefs = new KeyboardPreferences(this);
+        boolean landscape = isLandscape();
+        auxiliaryPanel = new KeyboardResizeView(this, mKeyboardUiFactory.theme,
+                landscape ? prefs.getLandscapeSize() : prefs.getPortraitSize(),
+                prefs.getKeyboardWidth(landscape), 20, landscape ? 85 : 70, 60, 100,
+                new KeyboardResizeView.Listener() {
+                    @Override public void onSizeChanged(int height, int width) { applyKeyboardSize(height, width); }
+                    @Override public void onReset() {
+                        int height = isLandscape() ? 70 : 40;
+                        applyKeyboardSize(height, 100);
+                        ((KeyboardResizeView) auxiliaryPanel).setSize(height, 100);
+                    }
+                    @Override public void onDone() { hideAuxiliaryPanel(); }
+                });
+        inputContainer.addFullWidthView(auxiliaryPanel, 0);
+    }
+
+    private void showEmoji() {
+        if (inputContainer == null) return;
+        hideAuxiliaryPanel();
+        cancelTypingState();
+        int height = mCurrentKeyboardLayoutView.getHeight();
+        if (height <= 0) height = Math.round(getResources().getDisplayMetrics().heightPixels
+                * (isLandscape() ? mKeyboardUiFactory.theme.sizeLandscape : mKeyboardUiFactory.theme.size));
+        auxiliaryPanel = new EmojiPickerView(this, mKeyboardUiFactory.theme, new EmojiPickerView.Listener() {
+            @Override public void onEmoji(String emoji) { onText(emoji); }
+            @Override public void onBackspace() {
+                InputConnection ic = getCurrentInputConnection();
+                if (ic == null) return;
+                cancelTypingState();
+                if (autoCorrectController != null) autoCorrectController.invalidateEditorPosition();
+                deleteEmojiCharacter(ic);
+            }
+            @Override public void onDone() { hideAuxiliaryPanel(); }
+        });
+        auxiliaryPanel.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Math.max(height, Math.round(240 * getResources().getDisplayMetrics().density))));
+        mCurrentKeyboardLayoutView.setVisibility(View.GONE);
+        if (swipeSuggestions != null) swipeSuggestions.setVisibility(View.GONE);
+        inputContainer.addKeyboardView(auxiliaryPanel, 0);
+    }
+
+    private void deleteEmojiCharacter(InputConnection ic) {
+        CharSequence selected = ic.getSelectedText(0);
+        if (selected != null && selected.length() > 0) { ic.commitText("", 1); return; }
+        CharSequence before = ic.getTextBeforeCursor(64, 0);
+        if (before == null || before.length() == 0) return;
+        int end = before.length();
+        int start = previousEmojiUnit(before, end);
+        int cp = Character.codePointBefore(before, end);
+        if (cp >= 0x1f1e6 && cp <= 0x1f1ff && start > 0) {
+            int previous = Character.codePointBefore(before, start);
+            if (previous >= 0x1f1e6 && previous <= 0x1f1ff) start -= Character.charCount(previous);
+        }
+        while (start > 0 && Character.codePointBefore(before, start) == 0x200d) {
+            start = previousEmojiUnit(before, start - 1);
+        }
+        ic.deleteSurroundingText(end - start, 0);
+    }
+
+    private static int previousEmojiUnit(CharSequence text, int end) {
+        int cp = Character.codePointBefore(text, end);
+        int start = end - Character.charCount(cp);
+        if ((cp == 0xfe0f || cp == 0x20e3 || cp >= 0x1f3fb && cp <= 0x1f3ff) && start > 0) {
+            int prior = Character.codePointBefore(text, start);
+            start -= Character.charCount(prior);
+            if (prior == 0xfe0f && start > 0) start -= Character.charCount(Character.codePointBefore(text, start));
+        }
+        return start;
     }
 
     static boolean supportsAutoCorrectInputType(int inputType) {
@@ -949,15 +1282,7 @@ public class CodeBoardIME extends InputMethodService
     }
 
     private void deleteTypedCharacter(InputConnection ic) {
-        CharSequence selected = ic.getSelectedText(0);
-        if (selected != null && selected.length() > 0) {
-            ic.commitText("", 1);
-            return;
-        }
-        CharSequence before = ic.getTextBeforeCursor(2, 0);
-        int length = before == null || before.length() == 0 ? 1
-                : Character.charCount(Character.codePointBefore(before, before.length()));
-        ic.deleteSurroundingText(length, 0);
+        deleteEmojiCharacter(ic);
     }
 
     private boolean isSwipeAvailable() {
@@ -984,6 +1309,8 @@ public class CodeBoardIME extends InputMethodService
 
     private void onSwipeGesture(List<SwipeGesture.Point> path, List<SwipeGesture.KeyPosition> keys) {
         clearLongPressTimer();
+        if (voiceInputBridge != null) voiceInputBridge.onManualInput();
+        typingConveniences.clear();
         if (deferPendingInput(() -> onSwipeGesture(path, keys))) return;
         if (!isSwipeAvailable() || swipeTypingController == null) return;
         InputConnection ic = getCurrentInputConnection();
@@ -1014,6 +1341,7 @@ public class CodeBoardIME extends InputMethodService
 
     @Override
     public void onDestroy() {
+        if (voiceInputBridge != null) voiceInputBridge.close();
         cancelTypingState();
         if (swipeTypingController != null) swipeTypingController.close();
         if (autoCorrectController != null) autoCorrectController.close();
@@ -1026,6 +1354,7 @@ public class CodeBoardIME extends InputMethodService
     }
 
     private void clearLongPressTimer() {
+        longPressGeneration++;
         if (timerLongPress != null) {
             timerLongPress.cancel();
         }

@@ -35,13 +35,24 @@ public class TypingCorrectorTest {
         assertEquals("hello", result.candidates.get(1));
         assertTrue(result.candidates.contains("help"));
         assertNull(result.correction);
+        assertEquals("hello", result.bestSuggestion);
+    }
+
+    @Test public void commonMissingLetterRanksFirstForShortInput() {
+        TypingCorrector.Result result = ENGLISH.suggest("wih", 5);
+        assertEquals("wih", result.candidates.get(0));
+        assertEquals("with", result.candidates.get(1));
+        assertEquals("with", result.bestSuggestion);
+        assertNull(result.correction);
+        assertEquals("With", ENGLISH.suggest("Wih", 5).bestSuggestion);
     }
 
     @Test public void exactWordsIncludingRareOnesAndCommonContractionsAreNeverReplaced() {
-        for (String text : Arrays.asList("the", "hello", "helo", "dont", "don't", "DON’T")) {
+        for (String text : Arrays.asList("the", "hello", "helo", "dont", "don't", "DON’T", "my")) {
             TypingCorrector.Result result = ENGLISH.suggest(text, 6);
             assertTrue(text, result.exactWord);
             assertNull(text, result.correction);
+            assertNull(text, result.bestSuggestion);
             assertEquals(text, result.candidates.get(0));
         }
     }
@@ -52,9 +63,11 @@ public class TypingCorrectorTest {
         assertEquals("TEH", upper.candidates.get(0));
         assertEquals("THE", upper.candidates.get(1));
         assertNull(upper.correction);
+        assertNull(upper.bestSuggestion);
         TypingCorrector.Result mixed = ENGLISH.suggest("tEh", 4);
         assertEquals("tEh", mixed.candidates.get(0));
         assertNull(mixed.correction);
+        assertNull(mixed.bestSuggestion);
     }
 
     @Test public void identifiersUrlsDigitsPunctuationAndMixedScriptsAreNotChanged() {
@@ -63,15 +76,19 @@ public class TypingCorrectorTest {
             TypingCorrector.Result result = ENGLISH.suggest(text, 5);
             assertEquals(text, Collections.singletonList(text), result.candidates);
             assertNull(text, result.correction);
+            assertNull(text, result.bestSuggestion);
         }
         assertEquals(Collections.singletonList("안녕abc"), KOREAN.suggest("안녕abc", 5).candidates);
         assertNull(KOREAN.suggest("안녕abc", 5).correction);
+        assertNull(KOREAN.suggest("안녕abc", 5).bestSuggestion);
     }
 
     @Test public void noAutomaticReplacementForShortWordsOrAmbiguousAlternatives() {
         TypingCorrector english = new TypingCorrector(entries("the", 10000, "she", 10000), false);
         assertNull(english.suggest("th", 5).correction);
+        assertNull(english.suggest("th", 5).bestSuggestion);
         assertNull(english.suggest("tge", 5).correction);
+        assertEquals("the", english.suggest("tge", 5).bestSuggestion);
         TypingCorrector ambiguous = new TypingCorrector(entries("hello", 3000, "help", 3000), false);
         assertNull(ambiguous.suggest("hellp", 5).correction);
         TypingCorrector almostAmbiguous = new TypingCorrector(entries("hello", 1000, "help", 100), false);
@@ -79,6 +96,7 @@ public class TypingCorrectorTest {
         TypingCorrector korean = new TypingCorrector(entries("안녕", 10000), true);
         assertTrue(korean.suggest("안넝", 5).candidates.contains("안녕"));
         assertNull(korean.suggest("안넝", 5).correction);
+        assertNull(korean.suggest("안넝", 5).bestSuggestion);
     }
 
     @Test public void contractionsSupportApostropheTyposAndCurlyApostrophes() {
@@ -95,13 +113,16 @@ public class TypingCorrectorTest {
         assertTrue(exact.exactWord);
         assertEquals(Arrays.asList("albert", "Albert"), exact.candidates);
         assertNull(exact.correction);
+        assertNull(exact.bestSuggestion);
         assertCorrection(english, "Albrt", "Albert");
         assertCorrection(english, "albrt", "Albert");
         assertNull(english.suggest("ALBRT", 3).correction);
+        assertNull(english.suggest("ALBRT", 3).bestSuggestion);
         assertEquals("ALBERT", english.suggest("ALBRT", 3).candidates.get(1));
         assertEquals("JavaScript", english.suggest("javasript", 3).candidates.get(1));
         assertEquals("JavaScript", english.suggest("JavaScrit", 3).candidates.get(1));
         assertNull(english.suggest("JavaScrit", 3).correction);
+        assertNull(english.suggest("JavaScrit", 3).bestSuggestion);
         TypingCorrector override = new TypingCorrector(entries("the", 22761659, "The", 2000000), false);
         assertEquals(Arrays.asList("the", "The"), override.suggest("the", 3).candidates);
         assertCorrection(override, "teh", "The");
@@ -116,17 +137,20 @@ public class TypingCorrectorTest {
         TypingCorrector.Result exact = KOREAN.suggest("안녕하세요", 4);
         assertTrue(exact.exactWord);
         assertNull(exact.correction);
+        assertNull(exact.bestSuggestion);
         String decomposed = Normalizer.normalize("안녕하세요", Normalizer.Form.NFD);
         TypingCorrector.Result decomposedExact = KOREAN.suggest(decomposed, 4);
         assertTrue(decomposedExact.exactWord);
         assertEquals(decomposed, decomposedExact.candidates.get(0));
         assertNull(decomposedExact.correction);
+        assertNull(decomposedExact.bestSuggestion);
     }
 
     @Test public void koreanUsesShiftSensitiveJamoAndAvoidsAutomaticAmbiguity() {
         TypingCorrector korean = new TypingCorrector(entries("땀", 500), true);
         assertTrue(korean.suggest("담", 4).candidates.contains("땀"));
         assertNull(korean.suggest("담", 4).correction);
+        assertNull(korean.suggest("담", 4).bestSuggestion);
         TypingCorrector collisions = new TypingCorrector(entries("가", 500, "ㄱㅏ", 600), true);
         assertTrue(collisions.suggest("까", 4).candidates.contains("가"));
         assertTrue(collisions.suggest("까", 4).candidates.contains("ㄱㅏ"));
@@ -134,12 +158,22 @@ public class TypingCorrectorTest {
         TypingCorrector.Result ambiguous = korean.suggest("안녕하세여", 5);
         assertTrue(ambiguous.candidates.contains("안녕하세요"));
         assertNull(ambiguous.correction);
+        assertEquals(ambiguous.candidates.get(1), ambiguous.bestSuggestion);
+        assertEquals("안녕하세요", ambiguous.bestSuggestion);
+        TypingCorrector.Result incomplete = korean.suggest("안녕하세ㅕ", 5);
+        assertTrue(incomplete.candidates.contains("안녕하세요"));
+        assertNull(incomplete.bestSuggestion);
+        TypingCorrector.Result twoEdits = korean.suggest("안녕하새여", 5);
+        assertNull(twoEdits.correction);
+        assertEquals("안녕하세요", twoEdits.bestSuggestion);
         korean = new TypingCorrector(entries("안녕하세요", 5000, "안녕하세여", 1), true);
         assertTrue(korean.suggest("안녕하세여", 3).exactWord);
         assertNull(korean.suggest("안녕하세여", 3).correction);
+        assertNull(korean.suggest("안녕하세여", 3).bestSuggestion);
         korean = new TypingCorrector(entries("정말", 5000), true);
         assertTrue(korean.suggest("정마료", 5).candidates.contains("정말"));
         assertNull(korean.suggest("정마료", 5).correction);
+        assertNull(korean.suggest("정마료", 5).bestSuggestion);
     }
 
     @Test public void twoEditMatchesRemainSuggestionsOnly() {
@@ -147,6 +181,30 @@ public class TypingCorrectorTest {
         TypingCorrector.Result result = english.suggest("possivls", 5);
         assertTrue(result.candidates.contains("possible"));
         assertNull(result.correction);
+        assertEquals("possible", result.bestSuggestion);
+    }
+
+    @Test public void topSuggestionCanUseAnAddedDictionaryWord() {
+        List<Entry> entries = asset("en");
+        entries.add(new Entry("autocorrect", 100000));
+        TypingCorrector english = new TypingCorrector(entries, false);
+        TypingCorrector.Result result = english.suggest("autocorrext", 5);
+        assertEquals("autocorrect", result.bestSuggestion);
+        assertEquals(result.candidates.get(1), result.bestSuggestion);
+    }
+
+    @Test public void topSuggestionUsesRankingRegardlessOfFrequencyFloorOrCandidateLimit() {
+        TypingCorrector english = new TypingCorrector(entries("hello", 1, "help", 1), false);
+        TypingCorrector.Result result = english.suggest("hellp", 5);
+        assertEquals("hello", result.candidates.get(1));
+        assertNull(result.correction);
+        assertEquals(result.candidates.get(1), result.bestSuggestion);
+
+        TypingCorrector.Result limited = english.suggest("hellp", 1);
+        assertEquals(Collections.singletonList("hellp"), limited.candidates);
+        assertEquals("hello", limited.bestSuggestion);
+        assertNull(english.suggest("hellp", 0).bestSuggestion);
+        assertNull(english.suggest("zzzzzz", 5).bestSuggestion);
     }
 
     @Test public void handlesLimitsNullsAndImmutableResults() {
@@ -170,6 +228,7 @@ public class TypingCorrectorTest {
         assertEquals(typed, typed, result.candidates.get(0));
         assertEquals(typed, expected, result.candidates.get(1));
         assertEquals(typed, expected, result.correction);
+        assertEquals(typed, expected, result.bestSuggestion);
     }
 
     private static List<Entry> entries(Object... values) {

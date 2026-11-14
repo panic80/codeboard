@@ -11,6 +11,7 @@ import org.robolectric.RuntimeEnvironment;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -96,6 +97,83 @@ public class PersonalDictionaryTest {
             }
         }
         assertEquals(2, dictionary.getVersion());
+    }
+
+    @Test public void emailPersistsLiterallyAndUsesDomainInsensitiveMatching() {
+        assertTrue(dictionary.addWord("Learner80@Example.com"));
+        assertFalse(dictionary.addWord("Learner80@EXAMPLE.COM"));
+        // Local parts can be case-sensitive, even though domains cannot.
+        assertTrue(dictionary.addWord("learner80@example.com"));
+        assertTrue(dictionary.addWord("learner80+tag@example.com"));
+        assertEquals(3, dictionary.getVersion());
+
+        PersonalDictionary reloaded = new PersonalDictionary(context);
+        assertEquals(Arrays.asList("learner80+tag@example.com", "Learner80@Example.com",
+                "learner80@example.com"), reloaded.getEmailAddresses());
+        assertTrue(reloaded.contains("Learner80@EXAMPLE.COM"));
+        assertFalse(reloaded.contains("LEARNER80@example.com"));
+        assertFalse(reloaded.contains("learner80@"));
+        assertTrue(reloaded.removeWord("Learner80@EXAMPLE.COM"));
+        assertFalse(reloaded.removeWord("Learner80@example.com"));
+        assertEquals(4, dictionary.getVersion());
+        assertEquals(Arrays.asList("learner80+tag@example.com", "learner80@example.com"),
+                dictionary.getEmailAddresses());
+    }
+
+    @Test public void validatesEmailAddressesWithoutAcceptingMalformedInput() {
+        for (String address : Arrays.asList("learner80@example.com", "Learner80+tag@Example.COM",
+                "o'learner80@example.com", "learner.80@example-domain.com")) {
+            assertTrue(address, PersonalDictionary.isValidEmailAddress(address));
+            assertTrue(address, dictionary.addWord(address));
+        }
+        String domainOf254CharacterAddress = repeat("a", 63) + "." + repeat("b", 63) + "."
+                + repeat("c", 63) + "." + repeat("d", 52);
+        String longestAddress = "learner80@" + domainOf254CharacterAddress;
+        assertEquals(254, longestAddress.length());
+        assertTrue(PersonalDictionary.isValidEmailAddress(longestAddress));
+        assertTrue(dictionary.addWord(longestAddress));
+
+        for (String address : Arrays.asList("@example.com", "learner80@", "learner80@@example.com",
+                "learner80@example", "learner80@.example.com", "learner80@example..com",
+                "learner80@example.com.", "learner80@-example.com", "learner80@example-.com",
+                ".learner80@example.com", "learner80.@example.com", "learner..80@example.com",
+                "learner 80@example.com", "learner80@exa mple.com", "learner80@example.com\n",
+                "learner80@éxample.com", "learner80@example_com", repeat("a", 65) + "@example.com",
+                "learner80@" + repeat("a", 64) + ".com", longestAddress + "d")) {
+            assertFalse(address, PersonalDictionary.isValidEmailAddress(address));
+            try {
+                dictionary.addWord(address);
+                fail("Should reject malformed email: " + address);
+            } catch (IllegalArgumentException expected) {
+                assertNotNull(expected.getMessage());
+            }
+        }
+        assertEquals(5, dictionary.getVersion());
+    }
+
+    @Test public void retainsPreviousWordsAndKeepsEmailsOutOfWordDictionaries() {
+        context.getSharedPreferences("personal_dictionary", Context.MODE_PRIVATE).edit()
+                .putStringSet("words", new HashSet<>(Arrays.asList("Jeong", "한글")))
+                .putInt("version", 7).commit();
+        PersonalDictionary upgraded = new PersonalDictionary(context);
+        assertEquals(Arrays.asList("Jeong", "한글"), upgraded.getWords());
+        assertEquals(7, upgraded.getVersion());
+
+        assertTrue(upgraded.addWord("learner80@example.com"));
+        assertEquals(Arrays.asList("Jeong", "learner80@example.com", "한글"),
+                new PersonalDictionary(context).getWords());
+        assertEquals(8, upgraded.getVersion());
+        assertEquals(Collections.singletonList("Jeong"), words(upgraded.getEntries(false)));
+        assertEquals(Collections.singletonList("한글"), words(upgraded.getEntries(true)));
+
+        TypingCorrector typing = new TypingCorrector(upgraded.getEntries(false), false);
+        assertEquals(Collections.singletonList("learner80@example.com"),
+                typing.suggest("learner80@example.com", 5).candidates);
+        assertNull(typing.suggest("learner80@example.com", 5).correction);
+        assertFalse(typing.suggest("learner", 5).candidates.contains("learner80@example.com"));
+        assertTrue(upgraded.removeWord("learner80@EXAMPLE.COM"));
+        assertEquals(9, upgraded.getVersion());
+        assertEquals(Arrays.asList("Jeong", "한글"), dictionary.getWords());
     }
 
     @Test public void concurrentInstancesDoNotLoseUpdates() throws Exception {

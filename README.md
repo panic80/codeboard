@@ -22,13 +22,27 @@ Recognition runs on the device using bundled word lists. Swipe words are separat
 
 ### Autocorrect and personal words
 
-Typed English and Korean words receive spelling suggestions. Pressing Space applies a correction when the match is confident; ambiguous words remain as typed. Tap an alternative to choose a spelling. Backspace immediately after an automatic correction restores the original spelling and keeps the typed space. Autocorrect can be switched off in **Features > Autocorrect** and is unavailable in passwords, email/URL fields, or fields that request no suggestions. Mixed-case identifiers and tokens with numbers or code symbols are preserved.
+Typed English and Korean words receive spelling suggestions. Pressing Space applies the highest eligible spelling suggestion by default. Turn off **Features > Use most likely suggestion** to use conservative correction, which leaves ambiguous words as typed. Tap an alternative to choose a spelling. Backspace immediately after an automatic correction restores the original spelling and keeps the typed space. Autocorrect can be switched off in **Features > Autocorrect** and is unavailable in passwords, email/URL fields, or fields that request no suggestions. Mixed-case identifiers and tokens with numbers or code symbols are preserved.
 
 The **Add word** button beside the suggestions saves the word you are typing directly to your personal dictionary. The button shows the exact spelling it will save and changes to **Saved** afterward. If a word was just autocorrected, **Add word** restores and teaches your original spelling. Spelling suggestions have their own **Features > Spelling suggestions** switch, so you can use suggestions and teach words while automatic correction is off.
 
 Typing assistance also supports editors that do not provide extracted text, using verified keyboard edits, surrounding text, and reported cursor positions. Unknown or ambiguous cursor locations fail closed. Passwords and fields requesting no suggestions remain excluded. The empty suggestion bar explains when spelling suggestions are switched off or unavailable in the current field.
 
-Use **Features > Personal dictionary > Add word** to save an English or Korean word. Personal words are stored on the device, keep their saved spelling, and are shared by autocorrect and swipe typing. Tap a saved word in that screen to remove it. Dictionary changes take effect without restarting the app and survive app updates.
+Use **Features > Personal dictionary > Add word or email** to save an English or Korean word or an email address. Personal words are stored on the device, keep their saved spelling, and are shared by autocorrect and swipe typing. Tap a saved word in that screen to remove it. Dictionary changes take effect without restarting the app and survive app updates.
+
+Email addresses can also be saved from the suggestion row after typing a complete address, including digits, dots and plus tags. Use **SYM** for `@` and `+`; switching pages preserves the address being entered. Type the beginning of a saved address and tap its suggestion to reuse it. Addresses remain literal, are never automatically spell-corrected, and do not enter the swipe dictionary. Email fields support these literal suggestions unless the app requests no suggestions.
+
+### Keyboard tools and typing conveniences
+
+Tap **Tools** beside **SYM** for emoji, clipboard, voice typing, resize, language switching and settings. The emoji picker includes categories and recent selections. Its Backspace removes a complete supported emoji, including flags and variation selectors.
+
+**Tools > Resize** changes keyboard height and width live. Width can be 60–100%; the narrower keyboard is centered. Portrait and landscape sizes are saved separately, with Reset and Done controls.
+
+Drag horizontally across the spacebar to move the cursor. Press Shift first to select text while dragging. Holding Space without dragging still opens Android's keyboard chooser. Cursor control can be disabled in Features.
+
+Automatic English sentence capitalization and double-space period are enabled by default and have independent Features switches. Double-space punctuation applies to ordinary words; email addresses, URLs, numeric tokens and mixed-case code identifiers stay literal. Apps that request no suggestions and password fields are excluded.
+
+**Tools > Voice** opens the phone's installed speech recognizer in English or Korean. It requires a recognizer app and an editor that exposes a verifiable collapsed cursor. Results are inserted only after the original, unchanged editor resumes; ambiguous new input sessions discard the result. Voice availability and focus-return behavior require testing on a device.
 
 **<p align="center">If you are using Codeboard and would like to thank me:</p>**
 

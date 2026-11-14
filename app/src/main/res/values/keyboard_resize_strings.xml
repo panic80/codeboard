@@ -1,0 +1,15 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <string name="keyboard_resize_height">Height: %1$d%%</string>
+    <string name="keyboard_resize_width">Width: %1$d%%</string>
+    <!-- Percent is invariant in English and these controls use a 20–100 range. -->
+    <string name="keyboard_resize_height_description" tools:ignore="PluralsCandidate">Keyboard height, %1$d percent</string>
+    <string name="keyboard_resize_width_description" tools:ignore="PluralsCandidate">Keyboard width, %1$d percent</string>
+    <string name="keyboard_resize_reset">Reset</string>
+    <string name="keyboard_resize_done">Done</string>
+    <item name="keyboard_resize_height_slider" type="id" />
+    <item name="keyboard_resize_width_slider" type="id" />
+    <item name="keyboard_resize_height_label" type="id" />
+    <item name="keyboard_resize_width_label" type="id" />
+    <item name="keyboard_resize_reset_button" type="id" />
+    <item name="keyboard_resize_done_button" type="id" />
+</resources>

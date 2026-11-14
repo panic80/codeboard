@@ -84,6 +84,39 @@ public class PersonalDictionarySettingsTest {
         assertTrue(((TextView) list.findViewById(android.R.id.message)).getText().toString().contains("empty"));
     }
 
+    @Test public void userCanAddAndRemoveALiteralEmailAlongsideWords() {
+        assertTrue(new PersonalDictionary(context).addWord("Kim"));
+        MainActivity activity = Robolectric.buildActivity(MainActivity.class).setup().get();
+        SettingsFragment settings = (SettingsFragment) activity.getSupportFragmentManager()
+                .findFragmentById(R.id.settings_container);
+        settings.onPreferenceTreeClick(settings.findPreference("personal_dictionary"));
+        shadowOf(Looper.getMainLooper()).idle();
+
+        AlertDialog list = ShadowAlertDialog.getLatestAlertDialog();
+        click(list.getButton(DialogInterface.BUTTON_POSITIVE));
+        AlertDialog add = ShadowAlertDialog.getLatestAlertDialog();
+        EditText input = findInput(add.getWindow().getDecorView());
+        input.setText("learner80@example");
+        click(add.getButton(DialogInterface.BUTTON_POSITIVE));
+        assertTrue(add.isShowing());
+        assertNotNull(input.getError());
+        input.setText("Learner80@Example.com");
+        click(add.getButton(DialogInterface.BUTTON_POSITIVE));
+
+        PersonalDictionary dictionary = new PersonalDictionary(context);
+        assertEquals("Learner80@Example.com", dictionary.getEmailAddresses().get(0));
+        list = ShadowAlertDialog.getLatestAlertDialog();
+        ListView entries = list.getListView();
+        assertEquals(2, entries.getAdapter().getCount());
+        int emailIndex = entries.getAdapter().getItem(0).equals("Learner80@Example.com") ? 0 : 1;
+        entries.performItemClick(null, emailIndex, entries.getAdapter().getItemId(emailIndex));
+        shadowOf(Looper.getMainLooper()).idle();
+        AlertDialog remove = ShadowAlertDialog.getLatestAlertDialog();
+        click(remove.getButton(DialogInterface.BUTTON_POSITIVE));
+        assertTrue(dictionary.getEmailAddresses().isEmpty());
+        assertEquals("Kim", dictionary.getWords().get(0));
+    }
+
     private static void click(View view) {
         view.performClick();
         shadowOf(Looper.getMainLooper()).idle();

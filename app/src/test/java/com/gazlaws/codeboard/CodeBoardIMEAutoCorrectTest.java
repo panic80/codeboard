@@ -243,6 +243,8 @@ public class CodeBoardIMEAutoCorrectTest {
             PreferenceManager.getDefaultSharedPreferences(context).edit().clear()
                     .putBoolean("swipe_typing", true).putBoolean("auto_correction", autoCorrect)
                     .putBoolean("spelling_suggestions", autoCorrect)
+                    .putBoolean("auto_capitalization", false).putBoolean("use_top_suggestion", false)
+                    .putBoolean("double_space_period", false)
                     .putBoolean("vibrate", false).putBoolean("sound", false)
                     .putBoolean("notification", false).putBoolean("navbar", false)
                     .putString("layout", korean ? String.valueOf(Definitions.LAYOUT_KOREAN) : "0")

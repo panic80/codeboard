@@ -41,6 +41,7 @@ public final class AutoCorrectController {
     interface PersonalWordStore {
         boolean contains(String word);
         boolean add(String word);
+        default List<String> getEmailAddresses() { return Collections.emptyList(); }
     }
 
     private final ConnectionProvider connections;
@@ -72,8 +73,15 @@ public final class AutoCorrectController {
     private boolean closed;
     private boolean applyingEdit;
     private boolean autoCorrectionEnabled = true;
+    private boolean useTopSuggestion;
+    private boolean emailOnly;
     private boolean wordProtected;
     private long generation;
+    // Email addresses are literal entries, never spelling-dictionary words. Track only input
+    // entered one character at a time at a verified token boundary.
+    private Literal literal;
+    private LiteralBoundary literalBoundary;
+    private boolean literalVisible;
     // Some editors support surrounding text but not getExtractedText(). In those editors we
     // retain a caret only while the editor and its surrounding text remain accounted for.
     private InputConnection fallbackConnection;
@@ -111,9 +119,21 @@ public final class AutoCorrectController {
     }
 
     public void setSuggestionStrip(SuggestionStripView strip) {
-        if (this.strip != null && this.strip != strip) clearSuggestions();
+        if (this.strip != null && this.strip != strip) {
+            clearSuggestions();
+            if (literal != null || literalBoundary != null) {
+                generation++;
+                cancelQueuedSuggestions();
+                if (literalBoundary != null) literalBoundary.token = generation;
+            }
+        }
         this.strip = strip;
-        if (strip != null && word != null && validTrackedText(readContext(wordConnection))) {
+        if (strip != null && literalBoundary != null && validLiteralBoundary(literalBoundary)) {
+            showLiteralBoundary(literalBoundary);
+        } else if (strip != null && literal != null && validLiteralText(readContext(literal.connection)) &&
+                showLiteralSuggestions()) {
+            // The literal row takes precedence over word suggestions for this token.
+        } else if (strip != null && word != null && validTrackedText(readContext(wordConnection))) {
             requestSuggestions();
         } else if (strip != null && boundary != null && validBoundaryLocation(boundary)) {
             showBoundaryCandidates(boundary);
@@ -128,6 +148,29 @@ public final class AutoCorrectController {
         Surrounding surrounding = readSurrounding(connection);
         if (!fitsSelection(surrounding, start)) return;
         setFallback(connection, start, surrounding);
+    }
+
+    /** Returns the verified collapsed cursor position, or -1 when the editor is unknown. */
+    public int getVerifiedCursorPosition() {
+        if (closed) return -1;
+        InputConnection connection = connections.get();
+        SelectionRead selection = readSelection(connection);
+        Surrounding surrounding = readSurrounding(connection);
+        if (selection == null || selection.snapshot == null || surrounding == null ||
+                selection.snapshot.offset < 0 || connection != connections.get()) return -1;
+        long position = (long) selection.snapshot.offset + selection.snapshot.start;
+        if (position < 0 || position > Integer.MAX_VALUE) return -1;
+        if (selection.fallback && (!surrounding.equals(fallbackSurrounding) ||
+                !fitsSelection(surrounding, (int) position))) return -1;
+        return (int) position;
+    }
+
+    /** Returns the verified caret after the current word boundary, including any correction. */
+    public int getTrackedSpaceCursorPosition() {
+        if (closed || boundary == null) return -1;
+        Boundary current = boundary;
+        int position = getVerifiedCursorPosition();
+        return position >= 0 && boundary == current && validBoundary(current) ? position : -1;
     }
 
     /** Records the verified editor context immediately before a manual keyboard edit. */
@@ -161,7 +204,27 @@ public final class AutoCorrectController {
     public void onManualSpaceInserted() {
         if (closed) return;
         finishManualEdit("", " ");
-        cancel();
+        clearAfterOwnedEdit();
+    }
+
+    /** Accounts for a keyboard-owned replacement while preserving queued keyboard events. */
+    public void onManualTextReplaced(String removed, String inserted) {
+        if (closed) return;
+        finishManualEdit(removed, inserted);
+        clearAfterOwnedEdit();
+    }
+
+    private void clearAfterOwnedEdit() {
+        generation++;
+        cancelQueuedSuggestions();
+        clearWord();
+        clearLiteral();
+        literalBoundary = null;
+        blocked = false;
+        blockedSelection = null;
+        boundary = null;
+        busy = false;
+        clearSuggestions();
     }
 
     /** Controls automatic replacement without disabling manual suggestions or learning. */
@@ -169,6 +232,38 @@ public final class AutoCorrectController {
         if (autoCorrectionEnabled == enabled) return;
         autoCorrectionEnabled = enabled;
         cancel();
+    }
+
+    /** Uses the highest eligible suggestion at a space instead of the conservative correction. */
+    public void setUseTopSuggestion(boolean enabled) {
+        if (useTopSuggestion == enabled) return;
+        useTopSuggestion = enabled;
+        cancel();
+    }
+
+    /** Limits assistance to saved email literals in fields intended for email input. */
+    public void setEmailOnly(boolean enabled) {
+        if (emailOnly == enabled) return;
+        emailOnly = enabled;
+        cancel();
+    }
+
+    /** Keeps a verified literal when switching keyboard pages, but discards word state. */
+    public void onKeyboardPageChanged() {
+        if (closed) return;
+        generation++;
+        cancelQueuedSuggestions();
+        clearWord();
+        blocked = false;
+        blockedSelection = null;
+        boundary = null;
+        literalBoundary = null;
+        busy = false;
+        deferred.clear();
+        manualEdit = null;
+        if (literal != null && !validLiteralText(readContext(literal.connection))) clearLiteral();
+        clearSuggestions();
+        showLiteralSuggestions();
     }
 
     /** Ordinary keyboard input must wait while the preceding space is being resolved. */
@@ -183,6 +278,12 @@ public final class AutoCorrectController {
         if (closed) return;
         finishManualTyping(korean);
         invalidateBoundary();
+        trackLiteralTyping(korean);
+        if (!emailOnly) updateWordAfterTyping(korean);
+        refreshLiteralSuggestions();
+    }
+
+    private void updateWordAfterTyping(boolean korean) {
         if (blocked) { blockedSelection = selection(connections.get()); return; }
         InputConnection connection = connections.get();
         ContextText text = readContext(connection);
@@ -219,6 +320,12 @@ public final class AutoCorrectController {
         if (closed) return;
         finishManualTyping(false);
         invalidateBoundary();
+        trackLiteralTyping(false);
+        if (!emailOnly) updateWordAfterNonLetter();
+        refreshLiteralSuggestions();
+    }
+
+    private void updateWordAfterNonLetter() {
         if (blocked) { blockedSelection = selection(connections.get()); return; }
         ContextText text = readContext(connections.get());
         String expected = word == null ? null : word + punctuation;
@@ -242,6 +349,12 @@ public final class AutoCorrectController {
         if (closed) return;
         finishManualBackspace(korean);
         invalidateBoundary();
+        trackLiteralBackspace(korean);
+        if (!emailOnly) updateWordAfterBackspace(korean);
+        refreshLiteralSuggestions();
+    }
+
+    private void updateWordAfterBackspace(boolean korean) {
         if (blocked) { blockedSelection = selection(connections.get()); return; }
         if (word == null || this.korean != korean) return;
         ContextText text = readContext(connections.get());
@@ -275,6 +388,12 @@ public final class AutoCorrectController {
         if (closed) return false;
         InputConnection connection = connections.get();
         ContextText text = readContext(connection);
+        if (literal != null && validLiteralText(text) &&
+                PersonalDictionary.isValidEmailAddress(literal.value)) {
+            return commitLiteralSpace(connection);
+        }
+        clearLiteral();
+        if (emailOnly) { invalidateBoundary(); clearSuggestions(); return false; }
         if (blocked || word == null || connection != wordConnection || text == null ||
                 !validTrackedText(text)) {
             clearWord(); blocked = false; blockedSelection = null; invalidateBoundary(); return false;
@@ -339,6 +458,16 @@ public final class AutoCorrectController {
         InputConnection connection = connections.get();
         updateFallbackSelection(connection, oldStart, oldEnd, newStart, newEnd);
         Snapshot actual = selection(connection);
+        if (literal != null && !validLiteralText(readContext(connection))) {
+            clearLiteral();
+            if (literalVisible) { generation++; cancelQueuedSuggestions(); clearSuggestions(); }
+        }
+        if (literalBoundary != null) {
+            if (validLiteralBoundary(literalBoundary)) return;
+            literalBoundary = null;
+            generation++;
+            clearSuggestions();
+        }
         if (blocked && word == null && boundary == null && !busy) {
             if (blockedSelection == null || !blockedSelection.equals(actual)) {
                 blocked = false;
@@ -352,7 +481,7 @@ public final class AutoCorrectController {
         if (word == null && boundary == null && !busy) return;
         generation++;
         cancelQueuedSuggestions();
-        clearWord(); blocked = false; blockedSelection = null; boundary = null; busy = false; clearSuggestions();
+        clearWord(); clearLiteral(); blocked = false; blockedSelection = null; boundary = null; busy = false; clearSuggestions();
         // Pending input belongs to the original caret location, not the new selection.
         deferred.clear();
     }
@@ -361,7 +490,7 @@ public final class AutoCorrectController {
     public void cancel() {
         generation++;
         cancelQueuedSuggestions();
-        clearWord(); blocked = false; blockedSelection = null; boundary = null; busy = false;
+        clearWord(); clearLiteral(); literalBoundary = null; blocked = false; blockedSelection = null; boundary = null; busy = false;
         deferred.clear();
         clearSuggestions();
         manualEdit = null;
@@ -392,6 +521,7 @@ public final class AutoCorrectController {
 
     private void showCurrentWord(long token) {
         if (strip == null || word == null) return;
+        literalVisible = false;
         String current = word;
         InputConnection connection = wordConnection;
         strip.setTypedCandidates(Collections.singletonList(current),
@@ -526,6 +656,245 @@ public final class AutoCorrectController {
         return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z';
     }
 
+    private void trackLiteralTyping(boolean korean) {
+        InputConnection connection = connections.get();
+        ContextText text = readContext(connection);
+        if (korean || text == null || !safeAfter(text.after) || text.before.isEmpty()) {
+            clearLiteral();
+            return;
+        }
+        char added = text.before.charAt(text.before.length() - 1);
+        if (added < 33 || added > 126) { clearLiteral(); return; }
+
+        if (literal == null) {
+            // A paste, an existing token, or a cursor in the middle of a token is not manual input.
+            int start = text.before.length() - 1;
+            if (added == ',' || (start > 0 && !literalDelimiter(text.before.charAt(start - 1)))) return;
+            literal = new Literal(connection, String.valueOf(added), "", text);
+            return;
+        }
+
+        Literal previous = literal;
+        if (connection != previous.connection || !validPosition(previous.selection, text.selection, false) ||
+                !previous.after.equals(text.after) ||
+                !tail(previous.before + added, CONTEXT_LIMIT).equals(text.before)) {
+            clearLiteral();
+            return;
+        }
+        if (!previous.punctuation.isEmpty() && added != ',') {
+            // A comma terminates the previous literal and starts a new one.
+            literal = new Literal(connection, String.valueOf(added), "", text);
+        } else if (added == ',') {
+            if (!PersonalDictionary.isValidEmailAddress(previous.value)) {
+                clearLiteral();
+                return;
+            }
+            literal = new Literal(connection, previous.value, previous.punctuation + added, text);
+        } else if (previous.value.length() < 254) {
+            literal = new Literal(connection, previous.value + added, "", text);
+        } else {
+            clearLiteral();
+        }
+    }
+
+    private void trackLiteralBackspace(boolean korean) {
+        Literal previous = literal;
+        if (previous == null) return;
+        InputConnection connection = connections.get();
+        ContextText text = readContext(connection);
+        if (korean || connection != previous.connection || text == null || !safeAfter(text.after) ||
+                !validBackspacePosition(previous.selection, text.selection, false) ||
+                !previous.after.equals(text.after) || previous.before.isEmpty()) {
+            clearLiteral();
+            return;
+        }
+        String remaining = previous.before.substring(0, previous.before.length() - 1);
+        boolean sameBefore = previous.before.length() == CONTEXT_LIMIT
+                ? text.before.endsWith(remaining) : text.before.equals(remaining);
+        if (!sameBefore) { clearLiteral(); return; }
+        if (!previous.punctuation.isEmpty()) {
+            literal = new Literal(connection, previous.value,
+                    previous.punctuation.substring(0, previous.punctuation.length() - 1), text);
+        } else if (previous.value.length() > 1) {
+            literal = new Literal(connection, previous.value.substring(0, previous.value.length() - 1), "", text);
+        } else {
+            clearLiteral();
+        }
+    }
+
+    private static boolean literalDelimiter(char c) {
+        return Character.isWhitespace(c) || c == ',';
+    }
+
+    private boolean validLiteralText(ContextText text) {
+        return literal != null && text != null && literal.connection == connections.get() &&
+                literal.selection.equals(text.selection) && literal.before.equals(text.before) &&
+                literal.after.equals(text.after) && safeAfter(text.after);
+    }
+
+    private List<String> matchingEmails(String prefix) {
+        if (personalWords == null) return Collections.emptyList();
+        ArrayList<String> matches = new ArrayList<>();
+        try {
+            for (String email : personalWords.getEmailAddresses()) {
+                if (email != null && PersonalDictionary.isValidEmailAddress(email) &&
+                        email.length() >= prefix.length() &&
+                        email.regionMatches(true, 0, prefix, 0, prefix.length())) matches.add(email);
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Could not read saved email addresses", e);
+        }
+        return matches;
+    }
+
+    private void refreshLiteralSuggestions() {
+        if (showLiteralSuggestions()) return;
+        if (literalVisible) {
+            generation++;
+            cancelQueuedSuggestions();
+            clearSuggestions();
+        }
+    }
+
+    private boolean showLiteralSuggestions() {
+        if (strip == null || personalWords == null || literal == null ||
+                !validLiteralText(readContext(literal.connection))) return false;
+        String target = literal.value;
+        boolean complete = PersonalDictionary.isValidEmailAddress(target);
+        List<String> matches = matchingEmails(target);
+        if (!complete && matches.isEmpty()) return false;
+
+        long token = ++generation;
+        cancelQueuedSuggestions();
+        InputConnection connection = literal.connection;
+        ArrayList<String> candidates = new ArrayList<>();
+        candidates.add(target);
+        for (String match : matches) if (!match.equals(target)) candidates.add(match);
+        strip.setTypedCandidates(candidates, candidate -> selectLiteralCandidate(token, connection, target, candidate));
+        if (!complete) strip.clearLearningAction();
+        else if (isPersonalWord(target)) strip.showLearningFeedback(target);
+        else strip.setLearnWord(target, () -> learnLiteral(token, connection, target));
+        literalVisible = true;
+        return true;
+    }
+
+    private boolean validLiteralTarget(long token, InputConnection connection, String target) {
+        return !closed && !busy && token == generation && literal != null &&
+                literal.connection == connection && literal.value.equals(target) &&
+                validLiteralText(readContext(connection));
+    }
+
+    private void learnLiteral(long token, InputConnection connection, String target) {
+        if (personalWords == null || !PersonalDictionary.isValidEmailAddress(target) ||
+                !validLiteralTarget(token, connection, target)) return;
+        beforeEdit.run();
+        if (!validLiteralTarget(token, connection, target)) return;
+        try { personalWords.add(target); }
+        catch (RuntimeException e) {
+            Log.w(TAG, "Could not save email address", e);
+            if (validLiteralTarget(token, connection, target) && strip != null) strip.showLearningError(target);
+            return;
+        }
+        if (validLiteralTarget(token, connection, target)) showLiteralSuggestions();
+    }
+
+    private void selectLiteralCandidate(long token, InputConnection connection, String target, String candidate) {
+        if (!validLiteralTarget(token, connection, target) || candidate == null ||
+                !matchingEmails(target).contains(candidate)) return;
+        beforeEdit.run();
+        if (!validLiteralTarget(token, connection, target) || !matchingEmails(target).contains(candidate)) return;
+        String old = literal.value + literal.punctuation;
+        String replacement = candidate + literal.punctuation;
+        String punctuation = literal.punctuation;
+        beforeManualEdit();
+        applyingEdit = true;
+        connection.beginBatchEdit();
+        boolean changed;
+        try {
+            changed = connection.deleteSurroundingText(old.length(), 0);
+            if (changed && !connection.commitText(replacement, 1)) {
+                connection.commitText(old, 1);
+                changed = false;
+            }
+        } finally { connection.endBatchEdit(); applyingEdit = false; }
+        finishManualEdit(changed ? old : "", changed ? replacement : "");
+        if (!changed) return;
+        ContextText text = readContext(connection);
+        if (text == null || !text.before.endsWith(replacement)) {
+            clearLiteral(); blockWord(); return;
+        }
+        literal = new Literal(connection, candidate, punctuation, text);
+        clearWord();
+        blocked = true;
+        blockedSelection = text.selection;
+        showLiteralSuggestions();
+    }
+
+    private boolean commitLiteralSpace(InputConnection connection) {
+        Literal current = literal;
+        generation++;
+        cancelQueuedSuggestions();
+        beforeManualEdit();
+        applyingEdit = true;
+        boolean inserted;
+        try { inserted = connection.commitText(" ", 1); }
+        finally { applyingEdit = false; }
+        finishManualEdit("", inserted ? " " : "");
+        clearWord(); clearLiteral(); blocked = false; blockedSelection = null;
+        boundary = null; busy = false; clearSuggestions();
+        if (!inserted) return false;
+        ContextText after = readContext(connection);
+        if (after == null || !after.before.endsWith(current.value + current.punctuation + " ")) return true;
+        literalBoundary = new LiteralBoundary(connection, current.value, current.punctuation, after, generation);
+        showLiteralBoundary(literalBoundary);
+        return true;
+    }
+
+    private boolean validLiteralBoundary(LiteralBoundary current) {
+        if (current == null || current.connection != connections.get()) return false;
+        ContextText text = readContext(current.connection);
+        return text != null && current.selection.equals(text.selection) &&
+                current.before.equals(text.before) && current.after.equals(text.after) &&
+                text.before.endsWith(current.value + current.punctuation + " ");
+    }
+
+    private void showLiteralBoundary(LiteralBoundary current) {
+        if (strip == null || literalBoundary != current) return;
+        strip.setTypedCandidates(Collections.singletonList(current.value), null);
+        if (personalWords == null) strip.clearLearningAction();
+        else if (current.learningFailed) strip.showLearningError(current.value);
+        else if (isPersonalWord(current.value)) strip.showLearningFeedback(current.value);
+        else {
+            long token = current.token;
+            strip.setLearnWord(current.value, () -> learnLiteralBoundary(current, token));
+        }
+        literalVisible = true;
+    }
+
+    private void learnLiteralBoundary(LiteralBoundary current, long token) {
+        if (closed || personalWords == null || literalBoundary != current ||
+                token != generation || token != current.token || !validLiteralBoundary(current)) return;
+        beforeEdit.run();
+        if (literalBoundary != current || token != generation || token != current.token ||
+                !validLiteralBoundary(current)) return;
+        try { personalWords.add(current.value); }
+        catch (RuntimeException e) {
+            Log.w(TAG, "Could not save email address", e);
+            if (literalBoundary == current && token == generation && token == current.token &&
+                    validLiteralBoundary(current)) {
+                current.learningFailed = true;
+                showLiteralBoundary(current);
+            }
+            return;
+        }
+        if (literalBoundary == current && token == generation && token == current.token &&
+                validLiteralBoundary(current)) {
+            showLiteralBoundary(current);
+        }
+    }
+
+    private void clearLiteral() { literal = null; }
+
     private void scheduleSuggestionWorker() {
         try {
             worker.execute(() -> {
@@ -580,6 +949,7 @@ public final class AutoCorrectController {
                 request.connection != connections.get() || !request.word.equals(word) ||
                 request.version != dictionaryVersion() || !validTrackedText(readContext(request.connection))) return;
         if (strip != null) {
+            literalVisible = false;
             final long token = generation;
             strip.setTypedCandidates(result.candidates, candidate -> selectWordCandidate(token, candidate));
         }
@@ -597,9 +967,10 @@ public final class AutoCorrectController {
         }
         if (result != null && current.version == dictionaryVersion()) {
             current.candidates = result.candidates;
+            String correction = useTopSuggestion ? result.bestSuggestion : result.correction;
             if (autoCorrectionEnabled && !current.protectedWord && !result.exactWord &&
-                    result.correction != null && !result.correction.equals(current.original) &&
-                    replaceBoundary(current, result.correction)) current.automatic = true;
+                    correction != null && !correction.equals(current.original) &&
+                    replaceBoundary(current, correction)) current.automatic = true;
             if (!validBoundaryLocation(current)) {
                 boundary = null; clearSuggestions(); deferred.clear();
                 return;
@@ -653,6 +1024,7 @@ public final class AutoCorrectController {
 
     private void showBoundaryCandidates(Boundary current) {
         if (strip == null || boundary != current) return;
+        literalVisible = false;
         long token = current.token;
         strip.setTypedCandidates(current.candidates, candidate -> {
             if (deferIfBusy(() -> selectBoundaryCandidate(current, token, candidate))) return;
@@ -718,7 +1090,9 @@ public final class AutoCorrectController {
     }
 
     private void invalidateBoundary() {
-        if (boundary != null) { boundary = null; generation++; clearSuggestions(); }
+        if (boundary != null || literalBoundary != null) {
+            boundary = null; literalBoundary = null; generation++; clearSuggestions();
+        }
     }
 
     private void blockWord() {
@@ -733,6 +1107,7 @@ public final class AutoCorrectController {
     }
 
     private void clearSuggestions() {
+        literalVisible = false;
         if (strip != null) {
             strip.setCandidates(Collections.emptyList(), null);
             strip.clearLearningAction();
@@ -1012,14 +1387,9 @@ public final class AutoCorrectController {
 
     private static PersonalWordStore personalWordStore(PersonalDictionary personal) {
         return new PersonalWordStore() {
-            @Override public boolean contains(String word) {
-                String normalized = Normalizer.normalize(word, Normalizer.Form.NFC).replace('’', '\'');
-                for (String stored : personal.getWords()) {
-                    if (stored.replace('’', '\'').equalsIgnoreCase(normalized)) return true;
-                }
-                return false;
-            }
+            @Override public boolean contains(String word) { return personal.contains(word); }
             @Override public boolean add(String word) { return personal.addWord(word); }
+            @Override public List<String> getEmailAddresses() { return personal.getEmailAddresses(); }
         };
     }
 
@@ -1113,6 +1483,30 @@ public final class AutoCorrectController {
         Request(InputConnection connection, String word, boolean korean, int version, long token) {
             this.connection = connection; this.word = word; this.korean = korean;
             this.version = version; this.token = token;
+        }
+    }
+
+    private static final class Literal {
+        final InputConnection connection;
+        final String value, punctuation, before, after;
+        final Snapshot selection;
+        Literal(InputConnection connection, String value, String punctuation, ContextText text) {
+            this.connection = connection; this.value = value; this.punctuation = punctuation;
+            this.before = text.before; this.after = text.after; this.selection = text.selection;
+        }
+    }
+
+    private static final class LiteralBoundary {
+        final InputConnection connection;
+        final String value, punctuation, before, after;
+        final Snapshot selection;
+        long token;
+        boolean learningFailed;
+        LiteralBoundary(InputConnection connection, String value, String punctuation,
+                        ContextText text, long token) {
+            this.connection = connection; this.value = value; this.punctuation = punctuation;
+            this.before = text.before; this.after = text.after; this.selection = text.selection;
+            this.token = token;
         }
     }
 

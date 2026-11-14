@@ -713,6 +713,368 @@ public class AutoCorrectControllerTest {
         assertLearning("Add word", true);
     }
 
+    @Test public void emailCanBeSavedExplicitlyAndCompletedWithItsOriginalSpelling() {
+        String address = "Learner80+class@example.com";
+        typeLiteral(address);
+        drain();
+        assertEquals(address, candidate(0));
+        assertLearning("Add word", true);
+        assertEquals(address, ((TextView) strip.findViewById(R.id.inline_learning_word)).getText().toString());
+        assertTrue(personal.getWords().isEmpty());
+        learn();
+        assertEquals(Arrays.asList(address), personal.getEmailAddresses());
+        assertTrue(personal.getEntries(false).isEmpty());
+        assertLearning("Saved", false);
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals(address + " ", text());
+        assertLearning("Saved", false);
+
+        typeLiteral("learn");
+        drain();
+        assertEquals("learn", candidate(0));
+        assertEquals(address, candidate(1));
+        assertEquals(View.GONE, learningAction().getVisibility());
+        click(1);
+        assertEquals(address + " " + address, text());
+        assertLearning("Saved", false);
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals(address + " " + address + " ", text());
+    }
+
+    @Test public void emailCanBeLearnedAfterSpaceAndTrailingCommaIsPreserved() {
+        String address = "learner80@example.com";
+        typeLiteral(address + ",");
+        assertLearning("Add word", true);
+        assertEquals(address, ((TextView) strip.findViewById(R.id.inline_learning_word)).getText().toString());
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals(address + ", ", text());
+        assertLearning("Add word", true);
+        assertTrue(personal.getEmailAddresses().isEmpty());
+        learn();
+        assertEquals(Arrays.asList(address), personal.getEmailAddresses());
+        assertLearning("Saved", false);
+        assertFalse(controller.undoCorrection());
+    }
+
+    @Test public void emailCallbacksRejectChangedTextCursorAndConnection() {
+        String address = "learner80@example.com";
+        typeLiteral(address);
+        View.OnClickListener staleAdd = learningListener();
+        nonletter('x');
+        staleAdd.onClick(learningAction());
+        assertTrue(personal.getEmailAddresses().isEmpty());
+
+        controller.cancel(); setText("");
+        typeLiteral(address);
+        staleAdd = learningListener();
+        Selection.setSelection(editor.getText(), 1);
+        staleAdd.onClick(learningAction());
+        assertTrue(personal.getEmailAddresses().isEmpty());
+
+        controller.cancel(); setText("");
+        typeLiteral(address);
+        staleAdd = learningListener();
+        editor.getText().replace(0, 1, "L");
+        Selection.setSelection(editor.getText(), editor.length());
+        staleAdd.onClick(learningAction());
+        assertTrue(personal.getEmailAddresses().isEmpty());
+
+        controller.cancel(); setText("");
+        typeLiteral(address);
+        staleAdd = learningListener();
+        EditText other = new EditText(context);
+        other.setText(address);
+        Selection.setSelection(other.getText(), other.length());
+        provider.current = new TestConnection(other);
+        staleAdd.onClick(learningAction());
+        assertTrue(personal.getEmailAddresses().isEmpty());
+    }
+
+    @Test public void staleEmailCompletionCannotReplaceMovedOrChangedToken() {
+        String address = "learner80@example.com";
+        assertTrue(personal.addWord(address));
+        typeLiteral("learn");
+        View.OnClickListener stale = shadowOf(candidateView(1)).getOnClickListener();
+        typeLiteral("e");
+        stale.onClick(candidateView(1));
+        assertEquals("learne", text());
+
+        View.OnClickListener moved = shadowOf(candidateView(1)).getOnClickListener();
+        Selection.setSelection(editor.getText(), 1);
+        moved.onClick(candidateView(1));
+        assertEquals("learne", text());
+        controller.onSelectionChanged(6, 6, 1, 1, -1);
+        assertEquals(0, strip.getCandidateCount());
+    }
+
+    @Test public void emailCompletionRechecksSurroundingTextAndConnection() {
+        String address = "learner80@example.com";
+        assertTrue(personal.addWord(address));
+        typeLiteral("learn");
+        View.OnClickListener changed = shadowOf(candidateView(1)).getOnClickListener();
+        editor.getText().replace(0, 1, "L");
+        Selection.setSelection(editor.getText(), editor.length());
+        changed.onClick(candidateView(1));
+        assertEquals("Learn", text());
+
+        controller.cancel(); setText("");
+        typeLiteral("learn");
+        View.OnClickListener switched = shadowOf(candidateView(1)).getOnClickListener();
+        EditText other = new EditText(context);
+        other.setText("learn");
+        Selection.setSelection(other.getText(), other.length());
+        provider.current = new TestConnection(other);
+        switched.onClick(candidateView(1));
+        assertEquals("learn", other.getText().toString());
+        assertEquals("learn", text());
+    }
+
+    @Test public void emailLearningAfterSpaceRejectsAChangedContext() {
+        typeLiteral("learner80@example.com");
+        assertTrue(controller.commitSpace());
+        View.OnClickListener stale = learningListener();
+        editor.getText().replace(0, 1, "L");
+        Selection.setSelection(editor.getText(), editor.length());
+        stale.onClick(learningAction());
+        assertTrue(personal.getEmailAddresses().isEmpty());
+    }
+
+    @Test public void replacingTheStripInvalidatesOldEmailActions() {
+        String address = "learner80@example.com";
+        typeLiteral(address);
+        View.OnClickListener stale = learningListener();
+        View oldAction = learningAction();
+        controller.setSuggestionStrip(null);
+        stale.onClick(oldAction);
+        assertTrue(personal.getEmailAddresses().isEmpty());
+        controller.setSuggestionStrip(strip);
+        assertTrue(controller.commitSpace());
+        View.OnClickListener staleBoundary = learningListener();
+        controller.setSuggestionStrip(null);
+        staleBoundary.onClick(oldAction);
+        assertTrue(personal.getEmailAddresses().isEmpty());
+        controller.setSuggestionStrip(strip);
+        learn();
+        assertEquals(Arrays.asList(address), personal.getEmailAddresses());
+    }
+
+    @Test public void verifiedCursorUsesExtractedOffsetAndRejectsRangesOrMissingContext() {
+        setText("abcdefgh");
+        connection.extractOffset = 5;
+        assertEquals(8, controller.getVerifiedCursorPosition());
+        Selection.setSelection(editor.getText(), 6, 8);
+        assertEquals(-1, controller.getVerifiedCursorPosition());
+        Selection.setSelection(editor.getText(), 8);
+        connection.noAfter = true;
+        assertEquals(-1, controller.getVerifiedCursorPosition());
+        connection.noAfter = false;
+        assertEquals(8, controller.getVerifiedCursorPosition());
+    }
+
+    @Test public void verifiedFallbackCursorDoesNotMutateTrackingWhenContextIsUnavailable() {
+        connection.noExtractedText = true;
+        assertEquals(-1, controller.getVerifiedCursorPosition());
+        controller.onStartInput(connection, 0, 0);
+        typeLiteral("learn");
+        assertEquals(5, controller.getVerifiedCursorPosition());
+        connection.noBefore = true;
+        assertEquals(-1, controller.getVerifiedCursorPosition());
+        connection.noBefore = false;
+        assertEquals(5, controller.getVerifiedCursorPosition());
+        editor.getText().replace(0, 1, "L");
+        Selection.setSelection(editor.getText(), 5);
+        assertEquals(-1, controller.getVerifiedCursorPosition());
+        editor.getText().replace(0, 1, "l");
+        Selection.setSelection(editor.getText(), 5);
+        assertEquals(5, controller.getVerifiedCursorPosition());
+    }
+
+    @Test public void trackedSpaceCursorFollowsVerifiedLengthChangingCorrection() {
+        enableFallback();
+        controller.setUseTopSuggestion(true);
+        assertEquals(-1, controller.getTrackedSpaceCursorPosition());
+        typeFallback("helo");
+        assertTrue(controller.commitSpace());
+        assertEquals(5, controller.getTrackedSpaceCursorPosition());
+        drain();
+        assertEquals("hello ", text());
+        assertEquals(6, controller.getTrackedSpaceCursorPosition());
+        Selection.setSelection(editor.getText(), 1);
+        assertEquals(-1, controller.getTrackedSpaceCursorPosition());
+        Selection.setSelection(editor.getText(), editor.length());
+        assertEquals(6, controller.getTrackedSpaceCursorPosition());
+        loader.version++;
+        assertEquals(-1, controller.getTrackedSpaceCursorPosition());
+    }
+
+    @Test public void literalInputRequiresManualBoundaryAndRejectsCodeAndUrls() {
+        assertTrue(personal.addWord("learner80@example.com"));
+        setText("learner80@example.");
+        typeLiteral("com");
+        assertEquals(View.GONE, learningAction().getVisibility());
+        assertEquals(0, strip.getCandidateCount());
+        for (String token : Arrays.asList("url:https://learner80@example.com",
+                "name:learner80@example.com", "learner80@example")) {
+            controller.cancel(); setText("");
+            typeLiteral(token);
+            assertEquals(token, View.GONE, learningAction().getVisibility());
+            assertFalse(token, controller.commitSpace());
+        }
+        assertEquals(Arrays.asList("learner80@example.com"), personal.getEmailAddresses());
+    }
+
+    @Test public void literalBackspaceAndFallbackRetainOnlyVerifiedInput() {
+        enableFallback();
+        String address = "learner80@example.com";
+        typeLiteral(address);
+        assertLearning("Add word", true);
+        View.OnClickListener stale = learningListener();
+        controller.beforeManualEdit();
+        connection.deleteSurroundingText(1, 0);
+        controller.onBackspaceTyped(false);
+        stale.onClick(learningAction());
+        assertTrue(personal.getEmailAddresses().isEmpty());
+        assertLearning("Add word", true); // The shorter .co domain is also a complete address.
+        typeLiteral("m");
+        assertLearning("Add word", true);
+        learn();
+        assertEquals(Arrays.asList(address), personal.getEmailAddresses());
+        assertTrue(controller.commitSpace());
+        typeLiteral("learner80@");
+        assertEquals(address, candidate(1));
+        click(1);
+        assertEquals(address + " " + address, text());
+    }
+
+    @Test public void emailOnlyModeDoesNotOfferOrCorrectOrdinaryWords() {
+        controller.setEmailOnly(true);
+        typeLiteral("teh");
+        drain();
+        assertEquals(0, strip.getCandidateCount());
+        assertEquals(View.GONE, learningAction().getVisibility());
+        assertFalse(controller.commitSpace());
+        controller.beforeManualEdit();
+        connection.commitText(" ", 1);
+        controller.onManualSpaceInserted();
+        typeLiteral("learner80@example.com");
+        assertLearning("Add word", true);
+        assertTrue(controller.commitSpace());
+        assertEquals("teh learner80@example.com ", text());
+    }
+
+    @Test public void pageChangesPreserveVerifiedEmailAndInvalidateWordActions() {
+        enableFallback();
+        typeLiteral("learner");
+        View.OnClickListener staleWordAction = learningListener();
+        View action = learningAction();
+        controller.onKeyboardPageChanged();
+        assertEquals(View.GONE, action.getVisibility());
+        staleWordAction.onClick(action);
+        assertTrue(personal.getWords().isEmpty());
+
+        typeLiteral("80@");
+        controller.onKeyboardPageChanged();
+        typeLiteral("example");
+        controller.onKeyboardPageChanged();
+        typeLiteral(".");
+        controller.onKeyboardPageChanged();
+        typeLiteral("com");
+        assertEquals(21, controller.getVerifiedCursorPosition());
+        assertLearning("Add word", true);
+        learn();
+        assertEquals(Arrays.asList("learner80@example.com"), personal.getEmailAddresses());
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("learner80@example.com ", text());
+    }
+
+    @Test public void pageChangesRebuildEmailCompletionsAndRejectStaleActions() {
+        String address = "learner80@example.com";
+        assertTrue(personal.addWord(address));
+        typeLiteral("learn");
+        View.OnClickListener staleCandidate = shadowOf(candidateView(1)).getOnClickListener();
+        View oldCandidate = candidateView(1);
+        controller.onKeyboardPageChanged();
+        assertEquals(address, candidate(1));
+        staleCandidate.onClick(oldCandidate);
+        assertEquals("learn", text());
+        click(1);
+        assertEquals(address, text());
+
+        controller.cancel(); setText("");
+        typeLiteral("learner81@example.com");
+        View.OnClickListener staleEmailAction = learningListener();
+        editor.getText().replace(0, 1, "L");
+        Selection.setSelection(editor.getText(), editor.length());
+        controller.onKeyboardPageChanged();
+        staleEmailAction.onClick(learningAction());
+        assertEquals(View.GONE, learningAction().getVisibility());
+        assertEquals(0, strip.getCandidateCount());
+        assertEquals(Arrays.asList(address), personal.getEmailAddresses());
+    }
+
+    @Test public void ownedReplacementPreservesDeferredInputAndFallbackCursor() {
+        enableFallback();
+        typeFallback("teh");
+        assertTrue(controller.commitSpace());
+        assertTrue(controller.deferIfBusy(() -> {
+            controller.beforeManualEdit();
+            assertTrue(connection.deleteSurroundingText(1, 0));
+            assertTrue(connection.commitText(". ", 1));
+            controller.onManualTextReplaced(" ", ". ");
+            assertEquals(5, controller.getVerifiedCursorPosition());
+        }));
+        assertTrue(controller.deferIfBusy(() -> typeFallback("world")));
+        drain();
+        assertEquals("the. world", text());
+        assertEquals(10, controller.getVerifiedCursorPosition());
+        assertLearning("Add word", true);
+    }
+
+    @Test public void manualSpacePreservesDeferredInputAndFallbackCursor() {
+        enableFallback();
+        typeFallback("teh");
+        assertTrue(controller.commitSpace());
+        assertTrue(controller.deferIfBusy(() -> {
+            assertFalse(controller.commitSpace());
+            controller.beforeManualEdit();
+            assertTrue(connection.commitText(" ", 1));
+            controller.onManualSpaceInserted();
+        }));
+        assertTrue(controller.deferIfBusy(() -> typeFallback("world")));
+        drain();
+        assertEquals("the  world", text());
+        assertEquals(10, controller.getVerifiedCursorPosition());
+        assertLearning("Add word", true);
+    }
+
+    @Test public void topSuggestionModeIsOptionalAndRespectsAutomaticCorrectionSetting() {
+        loader.entries.add(new SwipeDecoder.Entry("help", 3000));
+        controller.setUseTopSuggestion(true);
+        type("hellp");
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("hello ", text());
+
+        controller.setAutoCorrectionEnabled(false);
+        type("hellp");
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("hello hellp ", text());
+    }
+
+    private void typeLiteral(String token) {
+        for (char c : token.toCharArray()) {
+            controller.beforeManualEdit();
+            connection.commitText(String.valueOf(c), 1);
+            if (Character.isLetter(c)) controller.onTypedTextUpdated(false);
+            else controller.onNonLetterTyped();
+        }
+    }
+
     private void enableFallback() {
         connection.noExtractedText = true;
         controller.onStartInput(connection, 0, 0);
@@ -814,13 +1176,15 @@ public class AutoCorrectControllerTest {
     private static final class TestConnection extends BaseInputConnection {
         final EditText editor;
         boolean noExtractedText, noBefore, noAfter;
+        int extractOffset;
         TestConnection(EditText editor) { super((View) editor, true); this.editor = editor; }
         @Override public Editable getEditable() { return editor.getText(); }
         @Override public ExtractedText getExtractedText(ExtractedTextRequest request, int flags) {
             if (noExtractedText) return null;
             ExtractedText text = new ExtractedText();
-            text.selectionStart = Selection.getSelectionStart(editor.getText());
-            text.selectionEnd = Selection.getSelectionEnd(editor.getText());
+            text.startOffset = extractOffset;
+            text.selectionStart = Selection.getSelectionStart(editor.getText()) - extractOffset;
+            text.selectionEnd = Selection.getSelectionEnd(editor.getText()) - extractOffset;
             return text;
         }
         @Override public CharSequence getTextBeforeCursor(int n, int flags) {
@@ -863,15 +1227,11 @@ public class AutoCorrectControllerTest {
         final PersonalDictionary personal;
         boolean fail;
         TestPersonalWords(PersonalDictionary personal) { this.personal = personal; }
-        @Override public boolean contains(String word) {
-            for (String saved : personal.getWords()) {
-                if (saved.replace('’', '\'').equalsIgnoreCase(word.replace('’', '\''))) return true;
-            }
-            return false;
-        }
+        @Override public boolean contains(String word) { return personal.contains(word); }
         @Override public boolean add(String word) {
             if (fail) throw new IllegalStateException("Simulated saving failure");
             return personal.addWord(word);
         }
+        @Override public List<String> getEmailAddresses() { return personal.getEmailAddresses(); }
     }
 }

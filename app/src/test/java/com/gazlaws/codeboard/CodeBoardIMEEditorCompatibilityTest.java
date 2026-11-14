@@ -268,8 +268,10 @@ public class CodeBoardIMEEditorCompatibilityTest {
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI,
-                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+                        | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS
+                        | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         };
         for (int type : protectedTypes) {
             Fixture f = start(type, true);
@@ -329,6 +331,8 @@ public class CodeBoardIMEEditorCompatibilityTest {
             PreferenceManager.getDefaultSharedPreferences(context).edit().clear()
                     .putBoolean("swipe_typing", true).putBoolean("auto_correction", autoCorrection)
                     .putBoolean("spelling_suggestions", suggestions)
+                    .putBoolean("auto_capitalization", false).putBoolean("use_top_suggestion", false)
+                    .putBoolean("double_space_period", false)
                     .putBoolean("vibrate", false).putBoolean("sound", false)
                     .putBoolean("notification", false).putBoolean("navbar", false)
                     .putString("layout", "0").commit();

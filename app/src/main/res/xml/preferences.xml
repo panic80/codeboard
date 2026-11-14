@@ -12,6 +12,27 @@
     </PreferenceCategory>
     <PreferenceCategory android:title="Features">
         <SwitchPreferenceCompat
+            android:defaultValue="@bool/use_top_suggestion"
+            android:dependency="auto_correction"
+            android:key="use_top_suggestion"
+            android:title="@string/use_top_suggestion_title"
+            android:summary="@string/use_top_suggestion_summary" />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/auto_capitalization"
+            android:key="auto_capitalization"
+            android:title="@string/auto_capitalization_title"
+            android:summary="@string/auto_capitalization_summary" />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/double_space_period"
+            android:key="double_space_period"
+            android:title="@string/double_space_period_title"
+            android:summary="@string/double_space_period_summary" />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/cursor_control"
+            android:key="cursor_control"
+            android:title="@string/cursor_control_title"
+            android:summary="@string/cursor_control_summary" />
+        <SwitchPreferenceCompat
             android:defaultValue="@bool/spelling_suggestions"
             android:key="spelling_suggestions"
             android:title="@string/spelling_suggestions_title"
