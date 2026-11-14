@@ -21,6 +21,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.ResultReceiver;
 import android.os.Vibrator;
+import android.text.InputType;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
@@ -29,6 +30,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.media.MediaPlayer; // for keypress sound
+import android.widget.LinearLayout;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
@@ -38,6 +40,8 @@ import androidx.core.graphics.ColorUtils;
 
 import com.gazlaws.codeboard.input.HangulComposer;
 import com.gazlaws.codeboard.input.KoreanKeyMap;
+import com.gazlaws.codeboard.gesture.SwipeDecoder;
+import com.gazlaws.codeboard.gesture.SwipeTypingController;
 import com.gazlaws.codeboard.layout.Box;
 import com.gazlaws.codeboard.layout.Definitions;
 import com.gazlaws.codeboard.layout.Key;
@@ -45,10 +49,14 @@ import com.gazlaws.codeboard.layout.builder.KeyboardLayoutBuilder;
 import com.gazlaws.codeboard.layout.builder.KeyboardLayoutException;
 import com.gazlaws.codeboard.layout.ui.KeyboardLayoutView;
 import com.gazlaws.codeboard.layout.ui.KeyboardUiFactory;
+import com.gazlaws.codeboard.layout.ui.SwipeGesture;
+import com.gazlaws.codeboard.layout.ui.SuggestionStripView;
 import com.gazlaws.codeboard.theme.ThemeDefinitions;
 import com.gazlaws.codeboard.theme.ThemeInfo;
 
 import java.util.Collection;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -80,9 +88,14 @@ public class CodeBoardIME extends InputMethodService
     private final HangulComposer hangulComposer = new HangulComposer();
     private boolean koreanLayoutSelected = false;
     private boolean koreanMode = true;
+    private boolean swipeTypingEnabled = true;
+    private SwipeTypingController swipeTypingController;
+    private SuggestionStripView swipeSuggestions;
 
     @Override
     public void onKey(int primaryCode, int[] KeyCodes) {
+        final int originalCode = primaryCode;
+        if (deferSwipeInput(() -> onKey(originalCode, KeyCodes))) return;
         //NOTE: Long press goes second, this is onDown
         InputConnection ic = getCurrentInputConnection();
         if (ic == null) {
@@ -94,6 +107,12 @@ public class CodeBoardIME extends InputMethodService
                 && mKeyboardState == R.integer.keyboard_normal
                 && !ctrl;
         if (koreanKey != 0) primaryCode = koreanKey;
+        if (swipeTypingController != null && primaryCode != 16 && primaryCode != -5) {
+            boolean letter = primaryCode >= 'a' && primaryCode <= 'z'
+                    || primaryCode >= 'A' && primaryCode <= 'Z';
+            swipeTypingController.finish(ic, letter && !ctrl
+                    && mKeyboardState == R.integer.keyboard_normal);
+        }
         if (!koreanLetter && primaryCode != 16 && primaryCode != -5) {
             finishKoreanComposition(ic);
         }
@@ -212,6 +231,13 @@ public class CodeBoardIME extends InputMethodService
                     }
                 }
                 //Now shift/ctrl metadata is set
+                if (primaryCode == -5 && (meta & KeyEvent.META_CTRL_ON) == 0
+                        && swipeTypingController != null && swipeTypingController.backspace(ic)) {
+                    break;
+                }
+                if (primaryCode == -5 && swipeTypingController != null) {
+                    swipeTypingController.finish(ic, false);
+                }
                 if (koreanLetter) {
                     updateKoreanComposition(ic, hangulComposer.input(KoreanKeyMap.toJamo(code)));
                     break;
@@ -405,6 +431,7 @@ public class CodeBoardIME extends InputMethodService
 
     @Override
     public void onWindowHidden() {
+        cancelSwipeInput();
         finishKoreanComposition(getCurrentInputConnection());
         super.onWindowHidden();
         clearLongPressTimer();
@@ -412,12 +439,17 @@ public class CodeBoardIME extends InputMethodService
 
     @Override
     public void onViewClicked(boolean focusChanged) {
+        if (focusChanged) cancelSwipeInput();
         if (focusChanged) finishKoreanComposition(getCurrentInputConnection());
         super.onViewClicked(focusChanged);
         clearLongPressTimer();
     }
 
     public void onRelease(int primaryCode) {
+        if (primaryCode == 32 && deferSwipeInput(() -> onRelease(primaryCode))) {
+            clearLongPressTimer();
+            return;
+        }
 
         /*
          *   After the space button is released,
@@ -429,6 +461,7 @@ public class CodeBoardIME extends InputMethodService
 
             InputConnection ic = getCurrentInputConnection();
             if (ic != null) {
+                if (swipeTypingController != null) swipeTypingController.finish(ic, false);
                 finishKoreanComposition(ic);
                 ic.commitText(String.valueOf((char) primaryCode), 1);
             }
@@ -486,8 +519,11 @@ public class CodeBoardIME extends InputMethodService
     }
 
     public void onText(CharSequence text) {
+        String value = text.toString();
+        if (deferSwipeInput(() -> onText(value))) return;
         InputConnection ic = getCurrentInputConnection();
         if (ic != null) {
+            if (swipeTypingController != null) swipeTypingController.finish(ic, false);
             finishKoreanComposition(ic);
             ic.commitText(text, 1);
         }
@@ -533,6 +569,7 @@ public class CodeBoardIME extends InputMethodService
         vibrateLength = sharedPreferences.getVibrateLength();
         vibratorOn = sharedPreferences.isVibrateEnabled();
         soundOn = sharedPreferences.isSoundEnabled();
+        swipeTypingEnabled = sharedPreferences.isSwipeTypingEnabled();
         mKeyboardUiFactory.theme.enablePreview = sharedPreferences.isPreviewEnabled();
         mKeyboardUiFactory.theme.enableBorder = sharedPreferences.isBorderEnabled();
         mKeyboardUiFactory.theme.fontSize = sharedPreferences.getFontSizeAsSp();
@@ -561,6 +598,7 @@ public class CodeBoardIME extends InputMethodService
         int mLayout = sharedPreferences.getLayoutIndex();
         boolean nextKoreanLayout = mLayout == Definitions.LAYOUT_KOREAN;
         if (koreanLayoutSelected != nextKoreanLayout) {
+            cancelSwipeInput();
             finishKoreanComposition(getCurrentInputConnection());
             koreanMode = true;
         }
@@ -654,9 +692,34 @@ public class CodeBoardIME extends InputMethodService
 
             Collection<Key> keyboardLayout = builder.build();
             mCurrentKeyboardLayoutView = mKeyboardUiFactory.createKeyboardView(this, keyboardLayout);
+            if (swipeTypingEnabled) {
+                if (swipeTypingController == null) {
+                    swipeTypingController = new SwipeTypingController(this,
+                            new SwipeTypingController.ConnectionProvider() {
+                                @Override
+                                public InputConnection get() {
+                                    return getCurrentInputConnection();
+                                }
+                            });
+                }
+                swipeSuggestions = new SuggestionStripView(this, mKeyboardUiFactory.theme);
+                swipeTypingController.setSuggestionStrip(swipeSuggestions);
+            } else {
+                cancelSwipeInput();
+                if (swipeTypingController != null) swipeTypingController.setSuggestionStrip(null);
+                swipeSuggestions = null;
+            }
             controlKeyUpdateView();
             shiftKeyUpdateView();
-            return mCurrentKeyboardLayoutView;
+            updateSwipeAvailability();
+            if (swipeSuggestions == null) return mCurrentKeyboardLayoutView;
+            LinearLayout container = new LinearLayout(this);
+            container.setOrientation(LinearLayout.VERTICAL);
+            container.addView(swipeSuggestions, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            container.addView(mCurrentKeyboardLayoutView, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            return container;
 
         } catch (KeyboardLayoutException e) {
             e.printStackTrace();
@@ -673,24 +736,29 @@ public class CodeBoardIME extends InputMethodService
     @Override
     public void onStartInputView(EditorInfo attribute, boolean restarting) {
         super.onStartInputView(attribute, restarting);
-        setInputView(onCreateInputView());
         sEditorInfo = attribute;
+        setInputView(onCreateInputView());
     }
 
     @Override
     public void onStartInput(EditorInfo attribute, boolean restarting) {
         super.onStartInput(attribute, restarting);
+        cancelSwipeInput();
         finishKoreanComposition(getCurrentInputConnection());
+        sEditorInfo = attribute;
+        updateSwipeAvailability();
     }
 
     @Override
     public void onFinishInputView(boolean finishingInput) {
+        cancelSwipeInput();
         finishKoreanComposition(getCurrentInputConnection());
         super.onFinishInputView(finishingInput);
     }
 
     @Override
     public void onFinishInput() {
+        cancelSwipeInput();
         finishKoreanComposition(getCurrentInputConnection());
         clearLongPressTimer();
         super.onFinishInput();
@@ -701,6 +769,10 @@ public class CodeBoardIME extends InputMethodService
                                   int newSelEnd, int candidatesStart, int candidatesEnd) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd,
                 candidatesStart, candidatesEnd);
+        if (swipeTypingController != null) {
+            swipeTypingController.onSelectionChanged(oldSelStart, oldSelEnd,
+                    newSelStart, newSelEnd, candidatesEnd);
+        }
         if (hangulComposer.hasComposition()
                 && (newSelStart != candidatesEnd || newSelEnd != candidatesEnd)) {
             finishKoreanComposition(getCurrentInputConnection());
@@ -728,6 +800,69 @@ public class CodeBoardIME extends InputMethodService
 
     public void controlKeyUpdateView() {
         if (mCurrentKeyboardLayoutView != null) mCurrentKeyboardLayoutView.applyCtrlModifier(ctrl);
+        updateSwipeAvailability();
+    }
+
+    private boolean deferSwipeInput(Runnable event) {
+        return swipeTypingController != null && swipeTypingController.deferIfDecoding(event);
+    }
+
+    private void cancelSwipeInput() {
+        if (swipeTypingController != null) swipeTypingController.cancel(getCurrentInputConnection());
+    }
+
+    private boolean isSwipeAvailable() {
+        return swipeTypingEnabled && !ctrl && mKeyboardState == R.integer.keyboard_normal
+                && sEditorInfo != null && supportsSwipeInputType(sEditorInfo.inputType);
+    }
+
+    static boolean supportsSwipeInputType(int inputType) {
+        if ((inputType & InputType.TYPE_MASK_CLASS) != InputType.TYPE_CLASS_TEXT) return false;
+        int variation = inputType & InputType.TYPE_MASK_VARIATION;
+        return variation != InputType.TYPE_TEXT_VARIATION_PASSWORD
+                && variation != InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                && variation != InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD;
+    }
+
+    private void updateSwipeAvailability() {
+        if (mCurrentKeyboardLayoutView == null) return;
+        boolean enabled = isSwipeAvailable();
+        mCurrentKeyboardLayoutView.configureSwipe(enabled, this::onSwipeGesture);
+        if (swipeSuggestions != null) swipeSuggestions.setVisibility(enabled ? View.VISIBLE : View.GONE);
+    }
+
+    private void onSwipeGesture(List<SwipeGesture.Point> path, List<SwipeGesture.KeyPosition> keys) {
+        clearLongPressTimer();
+        if (deferSwipeInput(() -> onSwipeGesture(path, keys))) return;
+        if (!isSwipeAvailable() || swipeTypingController == null) return;
+        InputConnection ic = getCurrentInputConnection();
+        if (ic == null) return;
+        finishKoreanComposition(ic);
+        boolean capitalize = shift;
+        boolean capsLock = shiftLock;
+        if (shift && !shiftLock) {
+            shift = false;
+            ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT));
+            shiftKeyUpdateView();
+        }
+        List<SwipeDecoder.Point> points = new ArrayList<>(path.size());
+        for (SwipeGesture.Point point : path) {
+            points.add(new SwipeDecoder.Point(point.x, point.y, point.timeMs));
+        }
+        List<SwipeDecoder.KeyPosition> positions = new ArrayList<>(keys.size());
+        for (SwipeGesture.KeyPosition key : keys) {
+            positions.add(new SwipeDecoder.KeyPosition(key.letter, key.x, key.y, key.width, key.height));
+        }
+        swipeTypingController.onSwipe(points, positions, koreanLayoutSelected && koreanMode,
+                capitalize, capsLock);
+    }
+
+    @Override
+    public void onDestroy() {
+        cancelSwipeInput();
+        if (swipeTypingController != null) swipeTypingController.close();
+        clearLongPressTimer();
+        super.onDestroy();
     }
 
     public void shiftKeyUpdateView() {

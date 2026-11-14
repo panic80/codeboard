@@ -14,6 +14,9 @@ import android.text.InputType;
 import android.util.Log;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.TextView;
+import android.text.util.Linkify;
+import android.text.method.LinkMovementMethod;
 
 import androidx.annotation.ColorInt;
 import androidx.annotation.NonNull;
@@ -30,6 +33,11 @@ import com.gazlaws.codeboard.theme.ThemeInfo;
 //import com.pes.androidmaterialcolorpickerdialog.ColorPickerCallback;
 import com.github.evilbunny2008.androidmaterialcolorpickerdialog.ColorPicker;
 import com.github.evilbunny2008.androidmaterialcolorpickerdialog.ColorPickerCallback;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 
 import static android.provider.Settings.Secure.DEFAULT_INPUT_METHOD;
 
@@ -119,6 +127,9 @@ public class SettingsFragment extends PreferenceFragmentCompat implements IOnFoc
             return false;
         }
         switch (preference.getKey()) {
+            case "swipe_dictionary_credits":
+                showSwipeDictionaryCredits();
+                return true;
             case "change_keyboard":
                 InputMethodManager imm = (InputMethodManager)
                         requireActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
@@ -160,6 +171,33 @@ public class SettingsFragment extends PreferenceFragmentCompat implements IOnFoc
                     }
                 })
                 .show();
+    }
+
+    private void showSwipeDictionaryCredits() {
+        StringBuilder credits = new StringBuilder();
+        try {
+            for (String asset : new String[] {"swipe/NOTICE.md", "swipe/LICENSE-CC-BY-SA-4.0.txt"}) {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                        requireContext().getAssets().open(asset), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) credits.append(line).append('\n');
+                }
+                credits.append('\n');
+            }
+        } catch (IOException e) {
+            credits.append("Unable to load the dictionary credits.");
+            Log.e("SettingsFragment", "Loading swipe dictionary credits", e);
+        }
+        AlertDialog dialog = new AlertDialog.Builder(requireContext())
+                .setTitle(R.string.swipe_dictionary_credits_title)
+                .setMessage(credits.toString())
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
+        TextView message = dialog.findViewById(android.R.id.message);
+        if (message != null) {
+            Linkify.addLinks(message, Linkify.WEB_URLS);
+            message.setMovementMethod(LinkMovementMethod.getInstance());
+        }
     }
 
     public void classicSymbols() {

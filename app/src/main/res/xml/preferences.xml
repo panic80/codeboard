@@ -12,6 +12,15 @@
     </PreferenceCategory>
     <PreferenceCategory android:title="Features">
         <SwitchPreferenceCompat
+            android:defaultValue="@bool/swipe_typing"
+            android:key="swipe_typing"
+            android:title="@string/swipe_typing_title"
+            android:summary="@string/swipe_typing_summary" />
+        <Preference
+            android:key="swipe_dictionary_credits"
+            android:title="@string/swipe_dictionary_credits_title"
+            android:summary="@string/swipe_dictionary_credits_summary" />
+        <SwitchPreferenceCompat
             android:defaultValue="@bool/sound"
             android:key="sound"
             android:title="@string/sound_on_keypress" />

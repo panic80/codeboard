@@ -31,6 +31,10 @@ public class KeyboardPreferences {
                 res.getBoolean(R.bool.sound));
     }
 
+    public boolean isSwipeTypingEnabled() {
+        return read("swipe_typing", res.getBoolean(R.bool.swipe_typing));
+    }
+
     public void setSoundEnabled(boolean bool) {
         write("sound", bool);
     }
