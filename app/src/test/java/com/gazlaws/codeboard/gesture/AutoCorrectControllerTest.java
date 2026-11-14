@@ -162,28 +162,44 @@ public class AutoCorrectControllerTest {
     @Test public void movingCursorRejectsCorrectionButDoesNotRemoveTheAlreadyInsertedSpace() {
         type("teh");
         assertTrue(controller.commitSpace());
+        boolean[] ran = {false};
+        assertTrue(controller.deferIfBusy(() -> { ran[0] = true; connection.commitText("X", 1); }));
         Selection.setSelection(editor.getText(), 1);
         controller.onSelectionChanged(4, 4, 1, 1, -1);
         drain();
         assertEquals("teh ", text());
+        assertFalse(ran[0]);
         assertFalse(controller.undoCorrection());
     }
 
     @Test public void movementWithoutCallbackAlsoRejectsCorrection() {
         type("teh");
         assertTrue(controller.commitSpace());
+        boolean[] ran = {false};
+        assertTrue(controller.deferIfBusy(() -> { ran[0] = true; connection.commitText("X", 1); }));
         Selection.setSelection(editor.getText(), 1);
         drain();
         assertEquals("teh ", text());
+        assertFalse(ran[0]);
     }
 
     @Test public void oldSelectionCallbacksDoNotCancelAnUnmovedWord() {
         type("teh");
         controller.onSelectionChanged(0, 0, 1, 1, -1);
         assertTrue(controller.commitSpace());
+        assertTrue(controller.deferIfBusy(() -> connection.commitText("X", 1)));
         controller.onSelectionChanged(1, 1, 2, 2, -1);
         drain();
-        assertEquals("the ", text());
+        assertEquals("the X", text());
+    }
+
+    @Test public void changedDictionaryStillReplaysQueuedInputAtUnmovedCursor() {
+        type("teh");
+        assertTrue(controller.commitSpace());
+        assertTrue(controller.deferIfBusy(() -> connection.commitText("X", 1)));
+        loader.version++;
+        drain();
+        assertEquals("teh X", text());
     }
 
     @Test public void changingEditorOrCancellingDiscardsStaleWorkAndQueuedEvents() {

@@ -219,7 +219,8 @@ public final class AutoCorrectController {
         } catch (RejectedExecutionException e) {
             busy = false;
             boundary = null;
-            flushDeferred();
+            if (validBoundaryLocation(next)) flushDeferred();
+            else deferred.clear();
         }
         return true;
     }
@@ -250,12 +251,11 @@ public final class AutoCorrectController {
         if (expected != null && expected.equals(actual) &&
                 (word == null || validTrackedText(readContext(connection)))) return;
         if (word == null && boundary == null && !busy) return;
-        boolean sameEditor = boundary != null && boundary.connection == connection;
         generation++;
         cancelQueuedSuggestions();
         clearWord(); blocked = false; blockedSelection = null; boundary = null; busy = false; clearSuggestions();
-        if (sameEditor) flushDeferred();
-        else deferred.clear();
+        // Pending input belongs to the original caret location, not the new selection.
+        deferred.clear();
     }
 
     /** Resets state on focus, editor, mode, preference, paste or non-keyboard changes. */
@@ -352,19 +352,24 @@ public final class AutoCorrectController {
         busy = false;
         if (!validBoundary(current)) {
             boundary = null; clearSuggestions();
-            if (connections.get() == current.connection) flushDeferred(); else deferred.clear();
+            if (validBoundaryLocation(current)) flushDeferred(); else deferred.clear();
             return;
         }
         if (result != null && current.version == dictionaryVersion()) {
             current.candidates = result.candidates;
             if (!result.exactWord && result.correction != null && !result.correction.equals(current.original) &&
                     replaceBoundary(current, result.correction)) current.automatic = true;
+            if (!validBoundaryLocation(current)) {
+                boundary = null; clearSuggestions(); deferred.clear();
+                return;
+            }
             showBoundaryCandidates(current);
         } else {
             boundary = null;
             clearSuggestions();
         }
-        flushDeferred();
+        if (validBoundaryLocation(current)) flushDeferred();
+        else { boundary = null; clearSuggestions(); deferred.clear(); }
     }
 
     private void selectWordCandidate(long token, String candidate) {
@@ -443,7 +448,11 @@ public final class AutoCorrectController {
     }
 
     private boolean validBoundary(Boundary current) {
-        if (current.connection != connections.get() || current.version != dictionaryVersion()) return false;
+        return current.version == dictionaryVersion() && validBoundaryLocation(current);
+    }
+
+    private boolean validBoundaryLocation(Boundary current) {
+        if (current.connection != connections.get()) return false;
         ContextText text = readContext(current.connection);
         return text != null && current.selection.equals(text.selection) &&
                 text.before.endsWith(current.output + current.punctuation + " ");
