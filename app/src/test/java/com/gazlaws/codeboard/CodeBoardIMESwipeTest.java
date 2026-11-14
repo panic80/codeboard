@@ -166,7 +166,8 @@ public class CodeBoardIMESwipeTest {
         Fixture(boolean korean, int inputType) {
             Context app = RuntimeEnvironment.getApplication();
             PreferenceManager.getDefaultSharedPreferences(app).edit().clear()
-                    .putBoolean("swipe_typing", true).putBoolean("vibrate", false)
+                    .putBoolean("swipe_typing", true).putBoolean("auto_correction", false)
+                    .putBoolean("vibrate", false)
                     .putBoolean("sound", false).putBoolean("notification", false)
                     .putBoolean("navbar", false).putString("layout", korean ?
                             String.valueOf(Definitions.LAYOUT_KOREAN) : "0").commit();

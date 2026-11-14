@@ -42,6 +42,7 @@ import com.gazlaws.codeboard.input.HangulComposer;
 import com.gazlaws.codeboard.input.KoreanKeyMap;
 import com.gazlaws.codeboard.gesture.SwipeDecoder;
 import com.gazlaws.codeboard.gesture.SwipeTypingController;
+import com.gazlaws.codeboard.gesture.AutoCorrectController;
 import com.gazlaws.codeboard.layout.Box;
 import com.gazlaws.codeboard.layout.Definitions;
 import com.gazlaws.codeboard.layout.Key;
@@ -89,24 +90,31 @@ public class CodeBoardIME extends InputMethodService
     private boolean koreanLayoutSelected = false;
     private boolean koreanMode = true;
     private boolean swipeTypingEnabled = true;
+    private boolean autoCorrectEnabled = true;
     private SwipeTypingController swipeTypingController;
+    private AutoCorrectController autoCorrectController;
     private SuggestionStripView swipeSuggestions;
 
     @Override
     public void onKey(int primaryCode, int[] KeyCodes) {
         final int originalCode = primaryCode;
-        if (deferSwipeInput(() -> onKey(originalCode, KeyCodes))) return;
+        if (deferPendingInput(() -> onKey(originalCode, KeyCodes))) return;
         //NOTE: Long press goes second, this is onDown
         InputConnection ic = getCurrentInputConnection();
         if (ic == null) {
             hangulComposer.reset();
             return;
         }
+        boolean autoAvailable = isAutoCorrectAvailable();
         char koreanKey = KoreanKeyMap.qwertyKeyFor(primaryCode);
         boolean koreanLetter = koreanKey != 0 && koreanLayoutSelected && koreanMode
                 && mKeyboardState == R.integer.keyboard_normal
                 && !ctrl;
         if (koreanKey != 0) primaryCode = koreanKey;
+        if (autoCorrectController != null && primaryCode != 16 && primaryCode != 32
+                && primaryCode != -5 && (!autoAvailable || primaryCode < 32 || primaryCode > 126)) {
+            autoCorrectController.cancel();
+        }
         if (swipeTypingController != null && primaryCode != 16 && primaryCode != -5) {
             boolean letter = primaryCode >= 'a' && primaryCode <= 'z'
                     || primaryCode >= 'A' && primaryCode <= 'Z';
@@ -232,6 +240,10 @@ public class CodeBoardIME extends InputMethodService
                 }
                 //Now shift/ctrl metadata is set
                 if (primaryCode == -5 && (meta & KeyEvent.META_CTRL_ON) == 0
+                        && autoCorrectController != null && autoCorrectController.undoCorrection()) {
+                    break;
+                }
+                if (primaryCode == -5 && (meta & KeyEvent.META_CTRL_ON) == 0
                         && swipeTypingController != null && swipeTypingController.backspace(ic)) {
                     break;
                 }
@@ -240,14 +252,33 @@ public class CodeBoardIME extends InputMethodService
                 }
                 if (koreanLetter) {
                     updateKoreanComposition(ic, hangulComposer.input(KoreanKeyMap.toJamo(code)));
+                    if (autoAvailable && autoCorrectController != null) {
+                        autoCorrectController.onTypedTextUpdated(true);
+                    }
                     break;
                 }
                 if (primaryCode == -5 && (meta & KeyEvent.META_CTRL_ON) == 0
                         && hangulComposer.hasComposition()) {
                     updateKoreanComposition(ic, hangulComposer.backspace());
+                    if (autoAvailable && autoCorrectController != null) {
+                        autoCorrectController.onBackspaceTyped(true);
+                    }
                     break;
                 }
                 finishKoreanComposition(ic);
+                if (autoAvailable && (meta & KeyEvent.META_CTRL_ON) == 0) {
+                    if (primaryCode == -5) {
+                        deleteTypedCharacter(ic);
+                        autoCorrectController.onBackspaceTyped(koreanLayoutSelected && koreanMode);
+                        break;
+                    }
+                    if (primaryCode >= 33 && primaryCode <= 126) {
+                        ic.commitText(String.valueOf(code), 1);
+                        if (Character.isLetter(code)) autoCorrectController.onTypedTextUpdated(false);
+                        else autoCorrectController.onNonLetterTyped();
+                        break;
+                    }
+                }
                 //Convert primaryCode to KeyEvent:
                 //primaryCode is the char value, it doesn't correspond to the KeyEvent that we want to press
                 int ke = 0;
@@ -431,7 +462,7 @@ public class CodeBoardIME extends InputMethodService
 
     @Override
     public void onWindowHidden() {
-        cancelSwipeInput();
+        cancelTypingState();
         finishKoreanComposition(getCurrentInputConnection());
         super.onWindowHidden();
         clearLongPressTimer();
@@ -439,14 +470,14 @@ public class CodeBoardIME extends InputMethodService
 
     @Override
     public void onViewClicked(boolean focusChanged) {
-        if (focusChanged) cancelSwipeInput();
+        if (focusChanged) cancelTypingState();
         if (focusChanged) finishKoreanComposition(getCurrentInputConnection());
         super.onViewClicked(focusChanged);
         clearLongPressTimer();
     }
 
     public void onRelease(int primaryCode) {
-        if (primaryCode == 32 && deferSwipeInput(() -> onRelease(primaryCode))) {
+        if (primaryCode == 32 && deferPendingInput(() -> onRelease(primaryCode))) {
             clearLongPressTimer();
             return;
         }
@@ -463,7 +494,10 @@ public class CodeBoardIME extends InputMethodService
             if (ic != null) {
                 if (swipeTypingController != null) swipeTypingController.finish(ic, false);
                 finishKoreanComposition(ic);
-                ic.commitText(String.valueOf((char) primaryCode), 1);
+                if (!isAutoCorrectAvailable() || autoCorrectController == null
+                        || !autoCorrectController.commitSpace()) {
+                    ic.commitText(String.valueOf((char) primaryCode), 1);
+                }
             }
         }
 
@@ -520,9 +554,10 @@ public class CodeBoardIME extends InputMethodService
 
     public void onText(CharSequence text) {
         String value = text.toString();
-        if (deferSwipeInput(() -> onText(value))) return;
+        if (deferPendingInput(() -> onText(value))) return;
         InputConnection ic = getCurrentInputConnection();
         if (ic != null) {
+            if (autoCorrectController != null) autoCorrectController.cancel();
             if (swipeTypingController != null) swipeTypingController.finish(ic, false);
             finishKoreanComposition(ic);
             ic.commitText(text, 1);
@@ -570,6 +605,7 @@ public class CodeBoardIME extends InputMethodService
         vibratorOn = sharedPreferences.isVibrateEnabled();
         soundOn = sharedPreferences.isSoundEnabled();
         swipeTypingEnabled = sharedPreferences.isSwipeTypingEnabled();
+        autoCorrectEnabled = sharedPreferences.isAutoCorrectEnabled();
         mKeyboardUiFactory.theme.enablePreview = sharedPreferences.isPreviewEnabled();
         mKeyboardUiFactory.theme.enableBorder = sharedPreferences.isBorderEnabled();
         mKeyboardUiFactory.theme.fontSize = sharedPreferences.getFontSizeAsSp();
@@ -598,7 +634,7 @@ public class CodeBoardIME extends InputMethodService
         int mLayout = sharedPreferences.getLayoutIndex();
         boolean nextKoreanLayout = mLayout == Definitions.LAYOUT_KOREAN;
         if (koreanLayoutSelected != nextKoreanLayout) {
-            cancelSwipeInput();
+            cancelTypingState();
             finishKoreanComposition(getCurrentInputConnection());
             koreanMode = true;
         }
@@ -692,7 +728,7 @@ public class CodeBoardIME extends InputMethodService
 
             Collection<Key> keyboardLayout = builder.build();
             mCurrentKeyboardLayoutView = mKeyboardUiFactory.createKeyboardView(this, keyboardLayout);
-            if (swipeTypingEnabled) {
+            if (swipeTypingEnabled || autoCorrectEnabled) {
                 if (swipeTypingController == null) {
                     swipeTypingController = new SwipeTypingController(this,
                             new SwipeTypingController.ConnectionProvider() {
@@ -704,9 +740,27 @@ public class CodeBoardIME extends InputMethodService
                 }
                 swipeSuggestions = new SuggestionStripView(this, mKeyboardUiFactory.theme);
                 swipeTypingController.setSuggestionStrip(swipeSuggestions);
+                if (autoCorrectEnabled) {
+                    if (autoCorrectController == null) {
+                        autoCorrectController = new AutoCorrectController(this,
+                                new AutoCorrectController.ConnectionProvider() {
+                                    @Override public InputConnection get() {
+                                        return getCurrentInputConnection();
+                                    }
+                                }, () -> finishKoreanComposition(getCurrentInputConnection()));
+                    }
+                    autoCorrectController.setSuggestionStrip(swipeSuggestions);
+                } else if (autoCorrectController != null) {
+                    autoCorrectController.cancel();
+                    autoCorrectController.setSuggestionStrip(null);
+                }
+                swipeSuggestions.setHintText(autoCorrectEnabled
+                        ? (swipeTypingEnabled ? "Swipe or type for suggestions" : "Type for suggestions")
+                        : "Swipe across letters to type");
             } else {
-                cancelSwipeInput();
+                cancelTypingState();
                 if (swipeTypingController != null) swipeTypingController.setSuggestionStrip(null);
+                if (autoCorrectController != null) autoCorrectController.setSuggestionStrip(null);
                 swipeSuggestions = null;
             }
             controlKeyUpdateView();
@@ -743,7 +797,7 @@ public class CodeBoardIME extends InputMethodService
     @Override
     public void onStartInput(EditorInfo attribute, boolean restarting) {
         super.onStartInput(attribute, restarting);
-        cancelSwipeInput();
+        cancelTypingState();
         finishKoreanComposition(getCurrentInputConnection());
         sEditorInfo = attribute;
         updateSwipeAvailability();
@@ -751,14 +805,14 @@ public class CodeBoardIME extends InputMethodService
 
     @Override
     public void onFinishInputView(boolean finishingInput) {
-        cancelSwipeInput();
+        cancelTypingState();
         finishKoreanComposition(getCurrentInputConnection());
         super.onFinishInputView(finishingInput);
     }
 
     @Override
     public void onFinishInput() {
-        cancelSwipeInput();
+        cancelTypingState();
         finishKoreanComposition(getCurrentInputConnection());
         clearLongPressTimer();
         super.onFinishInput();
@@ -771,6 +825,10 @@ public class CodeBoardIME extends InputMethodService
                 candidatesStart, candidatesEnd);
         if (swipeTypingController != null) {
             swipeTypingController.onSelectionChanged(oldSelStart, oldSelEnd,
+                    newSelStart, newSelEnd, candidatesEnd);
+        }
+        if (autoCorrectController != null) {
+            autoCorrectController.onSelectionChanged(oldSelStart, oldSelEnd,
                     newSelStart, newSelEnd, candidatesEnd);
         }
         if (hangulComposer.hasComposition()
@@ -803,12 +861,41 @@ public class CodeBoardIME extends InputMethodService
         updateSwipeAvailability();
     }
 
-    private boolean deferSwipeInput(Runnable event) {
+    private boolean deferPendingInput(Runnable event) {
+        if (autoCorrectController != null && autoCorrectController.deferIfBusy(event)) return true;
         return swipeTypingController != null && swipeTypingController.deferIfDecoding(event);
     }
 
-    private void cancelSwipeInput() {
+    private void cancelTypingState() {
+        if (autoCorrectController != null) autoCorrectController.cancel();
         if (swipeTypingController != null) swipeTypingController.cancel(getCurrentInputConnection());
+    }
+
+    private boolean isAutoCorrectAvailable() {
+        return autoCorrectEnabled && autoCorrectController != null && !ctrl
+                && mKeyboardState == R.integer.keyboard_normal && sEditorInfo != null
+                && supportsAutoCorrectInputType(sEditorInfo.inputType);
+    }
+
+    static boolean supportsAutoCorrectInputType(int inputType) {
+        if (!supportsSwipeInputType(inputType)
+                || (inputType & InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS) != 0) return false;
+        int variation = inputType & InputType.TYPE_MASK_VARIATION;
+        return variation != InputType.TYPE_TEXT_VARIATION_URI
+                && variation != InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+                && variation != InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS;
+    }
+
+    private void deleteTypedCharacter(InputConnection ic) {
+        CharSequence selected = ic.getSelectedText(0);
+        if (selected != null && selected.length() > 0) {
+            ic.commitText("", 1);
+            return;
+        }
+        CharSequence before = ic.getTextBeforeCursor(2, 0);
+        int length = before == null || before.length() == 0 ? 1
+                : Character.charCount(Character.codePointBefore(before, before.length()));
+        ic.deleteSurroundingText(length, 0);
     }
 
     private boolean isSwipeAvailable() {
@@ -828,15 +915,17 @@ public class CodeBoardIME extends InputMethodService
         if (mCurrentKeyboardLayoutView == null) return;
         boolean enabled = isSwipeAvailable();
         mCurrentKeyboardLayoutView.configureSwipe(enabled, this::onSwipeGesture);
-        if (swipeSuggestions != null) swipeSuggestions.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        if (swipeSuggestions != null) swipeSuggestions.setVisibility(
+                enabled || isAutoCorrectAvailable() ? View.VISIBLE : View.GONE);
     }
 
     private void onSwipeGesture(List<SwipeGesture.Point> path, List<SwipeGesture.KeyPosition> keys) {
         clearLongPressTimer();
-        if (deferSwipeInput(() -> onSwipeGesture(path, keys))) return;
+        if (deferPendingInput(() -> onSwipeGesture(path, keys))) return;
         if (!isSwipeAvailable() || swipeTypingController == null) return;
         InputConnection ic = getCurrentInputConnection();
         if (ic == null) return;
+        if (autoCorrectController != null) autoCorrectController.cancel();
         finishKoreanComposition(ic);
         boolean capitalize = shift;
         boolean capsLock = shiftLock;
@@ -859,8 +948,9 @@ public class CodeBoardIME extends InputMethodService
 
     @Override
     public void onDestroy() {
-        cancelSwipeInput();
+        cancelTypingState();
         if (swipeTypingController != null) swipeTypingController.close();
+        if (autoCorrectController != null) autoCorrectController.close();
         clearLongPressTimer();
         super.onDestroy();
     }

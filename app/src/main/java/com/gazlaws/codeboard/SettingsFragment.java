@@ -12,8 +12,10 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
+import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.text.util.Linkify;
 import android.text.method.LinkMovementMethod;
@@ -26,6 +28,7 @@ import androidx.preference.ListPreference;
 import androidx.preference.Preference;
 import androidx.preference.PreferenceFragmentCompat;
 
+import com.gazlaws.codeboard.gesture.PersonalDictionary;
 import com.gazlaws.codeboard.theme.IOnFocusListenable;
 import com.gazlaws.codeboard.theme.ThemeDefinitions;
 import com.gazlaws.codeboard.theme.ThemeInfo;
@@ -38,6 +41,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static android.provider.Settings.Secure.DEFAULT_INPUT_METHOD;
 
@@ -127,6 +131,9 @@ public class SettingsFragment extends PreferenceFragmentCompat implements IOnFoc
             return false;
         }
         switch (preference.getKey()) {
+            case "personal_dictionary":
+                showPersonalDictionary();
+                return true;
             case "swipe_dictionary_credits":
                 showSwipeDictionaryCredits();
                 return true;
@@ -198,6 +205,71 @@ public class SettingsFragment extends PreferenceFragmentCompat implements IOnFoc
             Linkify.addLinks(message, Linkify.WEB_URLS);
             message.setMovementMethod(LinkMovementMethod.getInstance());
         }
+    }
+
+    private void showPersonalDictionary() {
+        PersonalDictionary dictionary = new PersonalDictionary(requireContext());
+        List<String> words = dictionary.getWords();
+        AlertDialog.Builder builder = new AlertDialog.Builder(requireContext())
+                .setTitle(R.string.personal_dictionary_title)
+                .setPositiveButton(R.string.personal_dictionary_add, (dialog, which) -> showAddPersonalWord())
+                .setNegativeButton(R.string.personal_dictionary_done, null);
+        if (words.isEmpty()) {
+            builder.setMessage(R.string.personal_dictionary_empty);
+        } else {
+            builder.setTitle(R.string.personal_dictionary_words_title);
+            builder.setItems(words.toArray(new String[0]), (dialog, which) ->
+                    showRemovePersonalWord(words.get(which)));
+        }
+        builder.show();
+    }
+
+    private void showAddPersonalWord() {
+        EditText input = new EditText(requireContext());
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        input.setHint(R.string.personal_dictionary_word_hint);
+        LinearLayout container = new LinearLayout(requireContext());
+        int padding = (int) (24 * getResources().getDisplayMetrics().density + 0.5f);
+        container.setPadding(padding, 0, padding, 0);
+        container.addView(input, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        AlertDialog dialog = new AlertDialog.Builder(requireContext())
+                .setTitle(R.string.personal_dictionary_add)
+                .setMessage(R.string.personal_dictionary_add_help)
+                .setView(container)
+                .setPositiveButton(R.string.personal_dictionary_add_button, null)
+                .setNegativeButton(android.R.string.cancel, (dismissed, which) -> showPersonalDictionary())
+                .setOnCancelListener(dismissed -> showPersonalDictionary())
+                .create();
+        dialog.setOnShowListener(shown -> dialog.getButton(DialogInterface.BUTTON_POSITIVE)
+                .setOnClickListener(view -> {
+                    try {
+                        if (!new PersonalDictionary(requireContext()).addWord(input.getText().toString())) {
+                            input.setError(getString(R.string.personal_dictionary_duplicate));
+                            return;
+                        }
+                        dialog.dismiss();
+                        showPersonalDictionary();
+                    } catch (IllegalArgumentException error) {
+                        input.setError(error.getMessage());
+                    }
+                }));
+        dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        dialog.show();
+        input.requestFocus();
+    }
+
+    private void showRemovePersonalWord(String word) {
+        new AlertDialog.Builder(requireContext())
+                .setTitle(getString(R.string.personal_dictionary_remove_title, word))
+                .setPositiveButton(R.string.personal_dictionary_remove, (dialog, which) -> {
+                    new PersonalDictionary(requireContext()).removeWord(word);
+                    showPersonalDictionary();
+                })
+                .setNegativeButton(android.R.string.cancel, (dialog, which) -> showPersonalDictionary())
+                .setOnCancelListener(dialog -> showPersonalDictionary())
+                .show();
     }
 
     public void classicSymbols() {

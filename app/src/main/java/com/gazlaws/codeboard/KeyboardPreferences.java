@@ -35,6 +35,10 @@ public class KeyboardPreferences {
         return read("swipe_typing", res.getBoolean(R.bool.swipe_typing));
     }
 
+    public boolean isAutoCorrectEnabled() {
+        return read("auto_correction", res.getBoolean(R.bool.auto_correction));
+    }
+
     public void setSoundEnabled(boolean bool) {
         write("sound", bool);
     }

@@ -1,0 +1,14 @@
+<resources>
+    <string name="personal_dictionary_title">Personal dictionary</string>
+    <string name="personal_dictionary_summary">Add or remove words for typing and swipe</string>
+    <string name="personal_dictionary_empty">Your dictionary is empty. Add an English or Korean word to get started.</string>
+    <string name="personal_dictionary_words_title">Personal dictionary: tap a word to remove</string>
+    <string name="personal_dictionary_add">Add word</string>
+    <string name="personal_dictionary_add_button">Add</string>
+    <string name="personal_dictionary_done">Done</string>
+    <string name="personal_dictionary_word_hint">Word</string>
+    <string name="personal_dictionary_add_help">Enter one English or Korean word, up to 48 characters. English apostrophes can appear inside a word.</string>
+    <string name="personal_dictionary_duplicate">This word is already in your dictionary.</string>
+    <string name="personal_dictionary_remove_title">Remove “%1$s”?</string>
+    <string name="personal_dictionary_remove">Remove</string>
+</resources>

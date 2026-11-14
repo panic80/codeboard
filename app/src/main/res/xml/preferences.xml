@@ -12,6 +12,15 @@
     </PreferenceCategory>
     <PreferenceCategory android:title="Features">
         <SwitchPreferenceCompat
+            android:defaultValue="@bool/auto_correction"
+            android:key="auto_correction"
+            android:title="@string/auto_correction_title"
+            android:summary="@string/auto_correction_summary" />
+        <Preference
+            android:key="personal_dictionary"
+            android:title="@string/personal_dictionary_title"
+            android:summary="@string/personal_dictionary_summary" />
+        <SwitchPreferenceCompat
             android:defaultValue="@bool/swipe_typing"
             android:key="swipe_typing"
             android:title="@string/swipe_typing_title"

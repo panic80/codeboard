@@ -46,6 +46,8 @@ public final class SwipeTypingController {
     private final ExecutorService ownedWorker;
     private final Handler mainHandler;
     private final DictionaryLoader loader;
+    private PersonalDictionary personalDictionary;
+    private int dictionaryVersion = Integer.MIN_VALUE;
     private final ArrayDeque<Runnable> deferred = new ArrayDeque<>();
 
     // These caches are only accessed by the single worker thread.
@@ -72,6 +74,7 @@ public final class SwipeTypingController {
     public SwipeTypingController(Context context, ConnectionProvider connections) {
         this(connections, Executors.newSingleThreadExecutor(), null,
                 assetLoader(context.getApplicationContext()), new Handler(Looper.getMainLooper()));
+        personalDictionary = new PersonalDictionary(context);
     }
 
     // Package-private injection makes ordering, failures and cancellation deterministic in tests.
@@ -125,12 +128,25 @@ public final class SwipeTypingController {
         try {
             worker.execute(() -> {
                 List<String> result = Collections.emptyList();
+                int personalVersion = personalDictionary == null ? 0 : personalDictionary.getVersion();
                 try {
+                    if (dictionaryVersion != personalVersion) {
+                        dictionaries[0] = null;
+                        dictionaries[1] = null;
+                        decoders.clear();
+                        dictionaryVersion = personalVersion;
+                    }
                     Geometry geometry = new Geometry(keyCopy, korean);
                     SwipeDecoder decoder = decoders.get(geometry);
                     if (decoder == null) {
                         int language = korean ? 1 : 0;
-                        if (dictionaries[language] == null) dictionaries[language] = loader.load(korean);
+                        if (dictionaries[language] == null) {
+                            dictionaries[language] = new ArrayList<>(loader.load(korean));
+                            if (personalDictionary != null) {
+                                dictionaries[language] = withPersonalWords(dictionaries[language],
+                                        personalDictionary.getEntries(korean), korean);
+                            }
+                        }
                         decoder = new SwipeDecoder(keyCopy, dictionaries[language]);
                         decoders.put(geometry, decoder);
                     }
@@ -139,7 +155,18 @@ public final class SwipeTypingController {
                     Log.w(TAG, "Could not decode swipe", e);
                 }
                 final List<String> decoded = result;
-                mainHandler.post(() -> onDecoded(token, connection, decoded, korean, capitalize, capsLock));
+                mainHandler.post(() -> {
+                    if (personalDictionary != null && personalDictionary.getVersion() != personalVersion) {
+                        if (token == generation) {
+                            busy = false;
+                            pendingSelection = null;
+                            showHint(NO_MATCH_HINT);
+                            flushDeferred();
+                        }
+                        return;
+                    }
+                    onDecoded(token, connection, decoded, korean, capitalize, capsLock);
+                });
             });
         } catch (RejectedExecutionException e) {
             busy = false;
@@ -402,6 +429,27 @@ public final class SwipeTypingController {
             }
             return result;
         };
+    }
+
+    private static List<SwipeDecoder.Entry> withPersonalWords(List<SwipeDecoder.Entry> builtIn,
+                                                             List<SwipeDecoder.Entry> personal,
+                                                             boolean korean) {
+        if (personal.isEmpty()) return builtIn;
+        Map<String, SwipeDecoder.Entry> merged = new LinkedHashMap<>();
+        for (SwipeDecoder.Entry entry : builtIn) {
+            merged.put(wordIdentity(entry.word, korean), entry);
+        }
+        for (SwipeDecoder.Entry entry : personal) {
+            String identity = wordIdentity(entry.word, korean);
+            SwipeDecoder.Entry previous = merged.get(identity);
+            merged.put(identity, new SwipeDecoder.Entry(entry.word, previous == null
+                    ? entry.frequency : Math.max(entry.frequency, previous.frequency)));
+        }
+        return new ArrayList<>(merged.values());
+    }
+
+    private static String wordIdentity(String word, boolean korean) {
+        return korean ? word : word.replace('\u2019', '\'').toLowerCase(Locale.ROOT);
     }
 
     /** Structural cache key, including language and actual on-screen positions. */
