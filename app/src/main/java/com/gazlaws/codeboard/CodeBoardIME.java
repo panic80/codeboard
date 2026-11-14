@@ -36,6 +36,8 @@ import androidx.core.app.NotificationManagerCompat;
 import androidx.core.app.RemoteInput;
 import androidx.core.graphics.ColorUtils;
 
+import com.gazlaws.codeboard.input.HangulComposer;
+import com.gazlaws.codeboard.input.KoreanKeyMap;
 import com.gazlaws.codeboard.layout.Box;
 import com.gazlaws.codeboard.layout.Definitions;
 import com.gazlaws.codeboard.layout.Key;
@@ -75,16 +77,43 @@ public class CodeBoardIME extends InputMethodService
     private KeyboardUiFactory mKeyboardUiFactory = null;
     private KeyboardLayoutView mCurrentKeyboardLayoutView = null;
     private boolean longPressedSpaceButton = false;
+    private final HangulComposer hangulComposer = new HangulComposer();
+    private boolean koreanLayoutSelected = false;
+    private boolean koreanMode = true;
 
     @Override
     public void onKey(int primaryCode, int[] KeyCodes) {
         //NOTE: Long press goes second, this is onDown
         InputConnection ic = getCurrentInputConnection();
+        if (ic == null) {
+            hangulComposer.reset();
+            return;
+        }
+        char koreanKey = KoreanKeyMap.qwertyKeyFor(primaryCode);
+        boolean koreanLetter = koreanKey != 0 && koreanLayoutSelected && koreanMode
+                && mKeyboardState == R.integer.keyboard_normal
+                && !ctrl;
+        if (koreanKey != 0) primaryCode = koreanKey;
+        if (!koreanLetter && primaryCode != 16 && primaryCode != -5) {
+            finishKoreanComposition(ic);
+        }
         char code = (char) primaryCode;
         Log.d(getClass().getSimpleName(), "onKey: " + primaryCode);
 
         switch (primaryCode) {
             //First handle cases that  don't use shift/ctrl meta modifiers
+            case Definitions.CODE_LANGUAGE_SWITCH:
+                if (koreanLayoutSelected) {
+                    koreanMode = !koreanMode;
+                    shift = shiftLock = false;
+                    ctrl = ctrlLock = false;
+                    ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT));
+                    ic.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_CTRL_LEFT));
+                    setInputView(onCreateInputView());
+                    controlKeyUpdateView();
+                    shiftKeyUpdateView();
+                }
+                break;
             case 53737:
                 ic.performContextMenuAction(android.R.id.selectAll);
                 break;
@@ -183,6 +212,16 @@ public class CodeBoardIME extends InputMethodService
                     }
                 }
                 //Now shift/ctrl metadata is set
+                if (koreanLetter) {
+                    updateKoreanComposition(ic, hangulComposer.input(KoreanKeyMap.toJamo(code)));
+                    break;
+                }
+                if (primaryCode == -5 && (meta & KeyEvent.META_CTRL_ON) == 0
+                        && hangulComposer.hasComposition()) {
+                    updateKoreanComposition(ic, hangulComposer.backspace());
+                    break;
+                }
+                finishKoreanComposition(ic);
                 //Convert primaryCode to KeyEvent:
                 //primaryCode is the char value, it doesn't correspond to the KeyEvent that we want to press
                 int ke = 0;
@@ -366,12 +405,14 @@ public class CodeBoardIME extends InputMethodService
 
     @Override
     public void onWindowHidden() {
+        finishKoreanComposition(getCurrentInputConnection());
         super.onWindowHidden();
         clearLongPressTimer();
     }
 
     @Override
     public void onViewClicked(boolean focusChanged) {
+        if (focusChanged) finishKoreanComposition(getCurrentInputConnection());
         super.onViewClicked(focusChanged);
         clearLongPressTimer();
     }
@@ -387,7 +428,10 @@ public class CodeBoardIME extends InputMethodService
         if ((primaryCode == 32) && (!longPressedSpaceButton)) {
 
             InputConnection ic = getCurrentInputConnection();
-            ic.commitText(String.valueOf((char) primaryCode), 1);
+            if (ic != null) {
+                finishKoreanComposition(ic);
+                ic.commitText(String.valueOf((char) primaryCode), 1);
+            }
         }
 
         longPressedSpaceButton = false;
@@ -399,6 +443,7 @@ public class CodeBoardIME extends InputMethodService
         // Process long-click here
         // This is following an onKey()
         InputConnection ic = getCurrentInputConnection();
+        if (ic == null) return;
         if (keyCode == 16) {
             shiftLock = !shiftLock;
             if (shiftLock) {
@@ -442,7 +487,10 @@ public class CodeBoardIME extends InputMethodService
 
     public void onText(CharSequence text) {
         InputConnection ic = getCurrentInputConnection();
-        ic.commitText(text, 1);
+        if (ic != null) {
+            finishKoreanComposition(ic);
+            ic.commitText(text, 1);
+        }
         clearLongPressTimer();
     }
 
@@ -511,6 +559,12 @@ public class CodeBoardIME extends InputMethodService
         String mCustomSymbolsSym4 = sharedPreferences.getCustomSymbolsSym4();
         String mCustomSymbolsMainBottom = sharedPreferences.getCustomSymbolsMainBottom();
         int mLayout = sharedPreferences.getLayoutIndex();
+        boolean nextKoreanLayout = mLayout == Definitions.LAYOUT_KOREAN;
+        if (koreanLayoutSelected != nextKoreanLayout) {
+            finishKoreanComposition(getCurrentInputConnection());
+            koreanMode = true;
+        }
+        koreanLayoutSelected = nextKoreanLayout;
 
         //Need this to get resources for drawables
         Definitions definitions = new Definitions(this);
@@ -563,8 +617,15 @@ public class CodeBoardIME extends InputMethodService
                     case 3:
                         Definitions.addQwertzRows(builder);
                         break;
+                    case Definitions.LAYOUT_KOREAN:
+                        if (koreanMode) {
+                            Definitions.addKoreanRows(builder);
+                        } else {
+                            Definitions.addQwertyRows(builder);
+                        }
+                        break;
                 }
-                definitions.addCustomSpaceRow(builder, mCustomSymbolsMainBottom);
+                definitions.addCustomSpaceRow(builder, mCustomSymbolsMainBottom, koreanLayoutSelected);
             } else if (mKeyboardState == R.integer.keyboard_clipboard) {
                 definitions.addClipboardActions(builder);
 
@@ -593,6 +654,8 @@ public class CodeBoardIME extends InputMethodService
 
             Collection<Key> keyboardLayout = builder.build();
             mCurrentKeyboardLayoutView = mKeyboardUiFactory.createKeyboardView(this, keyboardLayout);
+            controlKeyUpdateView();
+            shiftKeyUpdateView();
             return mCurrentKeyboardLayoutView;
 
         } catch (KeyboardLayoutException e) {
@@ -614,12 +677,61 @@ public class CodeBoardIME extends InputMethodService
         sEditorInfo = attribute;
     }
 
+    @Override
+    public void onStartInput(EditorInfo attribute, boolean restarting) {
+        super.onStartInput(attribute, restarting);
+        finishKoreanComposition(getCurrentInputConnection());
+    }
+
+    @Override
+    public void onFinishInputView(boolean finishingInput) {
+        finishKoreanComposition(getCurrentInputConnection());
+        super.onFinishInputView(finishingInput);
+    }
+
+    @Override
+    public void onFinishInput() {
+        finishKoreanComposition(getCurrentInputConnection());
+        clearLongPressTimer();
+        super.onFinishInput();
+    }
+
+    @Override
+    public void onUpdateSelection(int oldSelStart, int oldSelEnd, int newSelStart,
+                                  int newSelEnd, int candidatesStart, int candidatesEnd) {
+        super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd,
+                candidatesStart, candidatesEnd);
+        if (hangulComposer.hasComposition()
+                && (newSelStart != candidatesEnd || newSelEnd != candidatesEnd)) {
+            finishKoreanComposition(getCurrentInputConnection());
+        }
+    }
+
+    private void updateKoreanComposition(InputConnection ic, HangulComposer.Update update) {
+        ic.beginBatchEdit();
+        try {
+            if (!update.committedText.isEmpty()) {
+                ic.commitText(update.committedText, 1);
+            }
+            ic.setComposingText(update.composingText, 1);
+        } finally {
+            ic.endBatchEdit();
+        }
+    }
+
+    private void finishKoreanComposition(InputConnection ic) {
+        if (hangulComposer.hasComposition()) {
+            hangulComposer.reset();
+            if (ic != null) ic.finishComposingText();
+        }
+    }
+
     public void controlKeyUpdateView() {
-        mCurrentKeyboardLayoutView.applyCtrlModifier(ctrl);
+        if (mCurrentKeyboardLayoutView != null) mCurrentKeyboardLayoutView.applyCtrlModifier(ctrl);
     }
 
     public void shiftKeyUpdateView() {
-        mCurrentKeyboardLayoutView.applyShiftModifier(shift);
+        if (mCurrentKeyboardLayoutView != null) mCurrentKeyboardLayoutView.applyShiftModifier(shift);
     }
 
     private void clearLongPressTimer() {

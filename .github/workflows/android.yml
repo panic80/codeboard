@@ -26,9 +26,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Build with Gradle
+      - name: Build and test with Gradle
         run: |
-          ./gradlew.bat assemble --stacktrace
+          ./gradlew.bat testDebugUnitTest assemble assembleDebugAndroidTest --stacktrace
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4

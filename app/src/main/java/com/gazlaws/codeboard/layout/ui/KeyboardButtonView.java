@@ -177,11 +177,17 @@ public class KeyboardButtonView extends View {
             stopRepeating();
             return;
         }
-        timer = new Timer();
-        timer.scheduleAtFixedRate(new TimerTask() {
+        final Timer repeatTimer = new Timer();
+        timer = repeatTimer;
+        repeatTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {
-                submitKeyEvent();
+                post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isPressed && timer == repeatTimer) submitKeyEvent();
+                    }
+                });
             }
         },400, 50);
     }
