@@ -1066,6 +1066,112 @@ public class AutoCorrectControllerTest {
         assertEquals("hello hellp ", text());
     }
 
+    @Test public void strongContextCorrectsARealWordAndUndoRestoresTheOriginal() {
+        installContextFixture();
+        controller.setUseTopSuggestion(true);
+        setText("it is ");
+        type("bot");
+        drain();
+        assertEquals("bot", candidate(0));
+        assertEquals("not", candidate(1));
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("it is not ", text());
+        assertTrue(controller.undoCorrection());
+        assertEquals("it is bot ", text());
+    }
+
+    @Test public void savingAContextCorrectedWordRestoresAndProtectsIt() {
+        installContextFixture();
+        controller.setUseTopSuggestion(true);
+        setText("is ");
+        type("bot");
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("is not ", text());
+        learn();
+        assertEquals("is bot ", text());
+        assertEquals(Arrays.asList("bot"), personal.getWords());
+        controller.cancel();
+        setText("is ");
+        type("bot");
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("is bot ", text());
+    }
+
+    @Test public void exactWordContextCorrectionRespectsModesAndExplicitChoice() {
+        installContextFixture();
+        setText("is ");
+        type("bot");
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("is bot ", text()); // Conservative mode keeps dictionary words.
+
+        controller.setUseTopSuggestion(true);
+        controller.setAutoCorrectionEnabled(false);
+        setText("is ");
+        type("bot");
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("is bot ", text());
+
+        controller.setAutoCorrectionEnabled(true);
+        setText("the ");
+        type("bot");
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("the bot ", text()); // An ordinary use has no contrary evidence.
+
+        controller.cancel();
+        setText("is ");
+        type("bot");
+        drain();
+        click(0); // Explicitly keep the original even though "not" is suggested.
+        assertFalse(controller.commitSpace());
+        connection.commitText(" ", 1);
+        assertEquals("is bot ", text());
+    }
+
+    @Test public void changingOnlyTheContextDuringSpaceSearchRejectsTheOldResult() {
+        installContextFixture();
+        controller.setUseTopSuggestion(true);
+        setText("is ");
+        type("bot");
+        assertTrue(controller.commitSpace());
+        boolean[] ran = {false};
+        assertTrue(controller.deferIfBusy(() -> ran[0] = true));
+        setText("us bot "); // Same caret and target, changed earlier text without a callback.
+        drain();
+        assertEquals("us bot ", text());
+        assertFalse(ran[0]);
+        assertFalse(controller.undoCorrection());
+    }
+
+    @Test public void unavailableContextFallsBackToNormalSpelling() {
+        controller.setUseTopSuggestion(true);
+        loader.entries.add(new SwipeDecoder.Entry("help", 3000));
+        loader.contextModel = (previous, candidate) -> { throw new IllegalStateException("unavailable"); };
+        setText("is ");
+        type("hellp");
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("is hello ", text());
+    }
+
+    private void installContextFixture() {
+        loader.entries.add(new SwipeDecoder.Entry("bot", 100));
+        loader.entries.add(new SwipeDecoder.Entry("not", 100000));
+        loader.contextModel = new TypingCorrector.ContextModel() {
+            @Override public TypingCorrector.ContextEvidence score(String previous, String candidate) {
+                return new TypingCorrector.ContextEvidence(
+                        previous.endsWith("is ") && candidate.equals("not") ? 10000 : 0, 0);
+            }
+            @Override public long bigramOmittedUpperBound() { return 210; }
+            @Override public long trigramOmittedUpperBound() { return 130; }
+        };
+    }
+
     private void typeLiteral(String token) {
         for (char c : token.toCharArray()) {
             controller.beforeManualEdit();
@@ -1210,6 +1316,8 @@ public class AutoCorrectControllerTest {
         int version, loads;
         boolean fail, failVersion;
         PersonalDictionary personal;
+        TypingCorrector.ContextModel contextModel;
+        @Override public TypingCorrector.ContextModel loadContext() { return contextModel; }
         @Override public int version() {
             if (failVersion) throw new IllegalStateException("Version unavailable");
             return version + (personal == null ? 0 : personal.getVersion());

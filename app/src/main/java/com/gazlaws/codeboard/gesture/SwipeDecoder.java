@@ -24,6 +24,23 @@ public final class SwipeDecoder {
     private static final int MAX_SEQUENCE_LENGTH = 64;
     private static final float ENDPOINT_RADIUS = 1.7f;
 
+    /** Maximum amount that context can subtract from a candidate's gesture cost. */
+    public static final float MAX_CONTEXT_BONUS = 0.55f;
+
+    /**
+     * Supplies a context preference for a dictionary spelling. A larger positive value makes
+     * the spelling more likely; zero means no preference. Values are clamped to
+     * {@link #MAX_CONTEXT_BONUS}, so context can only influence sufficiently close gestures.
+     * The callbacks should be safe to call on the thread performing the decode.
+     */
+    @FunctionalInterface
+    public interface ContextPrior {
+        double bonus(String candidate);
+
+        /** If the geometry winner is protected, leave the geometry ranking unchanged. */
+        default boolean isProtected(String candidate) { return false; }
+    }
+
     /** A letter key in the same coordinate system as the recorded gesture. */
     public static final class KeyPosition {
         public final char key;
@@ -166,6 +183,15 @@ public final class SwipeDecoder {
 
     /** Returns the best dictionary spellings in ranked order, or an empty list for an unusable path. */
     public List<String> decode(List<Point> path, int limit) {
+        return decode(path, limit, null);
+    }
+
+    /**
+     * Ranks candidates with an optional, bounded context preference as well as gesture geometry.
+     * The geometry-only shortlist remains unchanged and the preference is evaluated once per
+     * shortlisted spelling. A null prior uses only the original geometry-based ranking.
+     */
+    public List<String> decode(List<Point> path, int limit, ContextPrior contextPrior) {
         if (path == null || path.size() < 2 || limit <= 0) return Collections.emptyList();
 
         ArrayList<Point> valid = new ArrayList<>(path.size());
@@ -234,6 +260,15 @@ public final class SwipeDecoder {
             ranked.add(new ScoredWord(word, score));
         }
         Collections.sort(ranked, BEST_FIRST);
+        if (contextPrior != null && !ranked.isEmpty()
+                && !contextPrior.isProtected(ranked.get(0).word.text)) {
+            for (int i = 0; i < ranked.size(); i++) {
+                ScoredWord original = ranked.get(i);
+                float bonus = contextBonus(contextPrior, original.word.text);
+                if (bonus > 0) ranked.set(i, new ScoredWord(original.word, original.score - bonus));
+            }
+            Collections.sort(ranked, BEST_FIRST);
+        }
         int count = Math.min(Math.min(limit, MAX_RESULT_COUNT), ranked.size());
         ArrayList<String> result = new ArrayList<>(count);
         for (int i = 0; i < count; i++) result.add(ranked.get(i).word.text);
@@ -300,6 +335,13 @@ public final class SwipeDecoder {
         final Word word;
         final float score;
         ScoredWord(Word word, float score) { this.word = word; this.score = score; }
+    }
+
+    private static float contextBonus(ContextPrior prior, String candidate) {
+        if (prior == null) return 0;
+        double bonus = prior.bonus(candidate);
+        // The comparison also rejects NaN; positive infinity is clamped to the maximum.
+        return bonus > 0 ? (float) Math.min(bonus, MAX_CONTEXT_BONUS) : 0;
     }
 
     private static final Comparator<ScoredWord> BEST_FIRST = (a, b) -> {

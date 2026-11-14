@@ -99,6 +99,7 @@ public class CodeBoardIME extends InputMethodService
     private boolean koreanMode = true;
     private boolean swipeTypingEnabled = true;
     private boolean autoCorrectEnabled = true;
+    private boolean useTopSuggestion = true;
     private boolean spellingSuggestionsEnabled = true;
     private int editorSelectionStart = -1;
     private int editorSelectionEnd = -1;
@@ -709,6 +710,7 @@ public class CodeBoardIME extends InputMethodService
         soundOn = sharedPreferences.isSoundEnabled();
         swipeTypingEnabled = sharedPreferences.isSwipeTypingEnabled();
         autoCorrectEnabled = sharedPreferences.isAutoCorrectEnabled();
+        useTopSuggestion = sharedPreferences.useTopSuggestion();
         spellingSuggestionsEnabled = sharedPreferences.isSpellingSuggestionsEnabled();
         autoCapitalizationEnabled = sharedPreferences.isAutoCapitalizationEnabled();
         doubleSpacePeriodEnabled = sharedPreferences.isDoubleSpacePeriodEnabled();
@@ -862,7 +864,7 @@ public class CodeBoardIME extends InputMethodService
                         created = true;
                     }
                     autoCorrectController.setAutoCorrectionEnabled(autoCorrectEnabled);
-                    autoCorrectController.setUseTopSuggestion(sharedPreferences.useTopSuggestion());
+                    autoCorrectController.setUseTopSuggestion(useTopSuggestion);
                     autoCorrectController.setEmailOnly(sEditorInfo != null
                             && supportsEmailLiteralInputType(sEditorInfo.inputType));
                     autoCorrectController.setSuggestionStrip(spellingSuggestionsEnabled ? swipeSuggestions : null);
@@ -1299,6 +1301,10 @@ public class CodeBoardIME extends InputMethodService
     }
 
     private void updateSwipeAvailability() {
+        if (swipeTypingController != null) {
+            swipeTypingController.setContextRankingEnabled(autoCorrectEnabled && useTopSuggestion
+                    && sEditorInfo != null && supportsAutoCorrectInputType(sEditorInfo.inputType));
+        }
         if (mCurrentKeyboardLayoutView == null) return;
         boolean enabled = isSwipeAvailable();
         mCurrentKeyboardLayoutView.configureSwipe(enabled, this::onSwipeGesture);

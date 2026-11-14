@@ -13,7 +13,9 @@ import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.Assert.*;
 
@@ -191,6 +193,99 @@ public class TypingCorrectorTest {
         TypingCorrector.Result result = english.suggest("autocorrext", 5);
         assertEquals("autocorrect", result.bestSuggestion);
         assertEquals(result.candidates.get(1), result.bestSuggestion);
+        TypingCorrector.Result missingLetter = english.suggest("autocrrect", 5);
+        assertEquals("autocorrect", missingLetter.bestSuggestion);
+        assertEquals(missingLetter.candidates.get(1), missingLetter.bestSuggestion);
+    }
+
+    @Test public void rareExactWordNeedsStrongAdjacentKeyAndContextEvidence() {
+        Counts counts = new Counts();
+        counts.put("autocorrect is ", "not", 10282, 0);
+        counts.put("the ", "bot", 1000, 0);
+        counts.put("chat ", "bot", 1000, 0);
+        TypingCorrector english = new TypingCorrector(entries("bot", 944, "not", 4262273,
+                "hot", 123994, "pot", 17692), false, counts);
+
+        TypingCorrector.Result result = english.suggest("bot", 5, "autocorrect is ");
+        assertTrue(result.exactWord);
+        assertEquals(Arrays.asList("bot", "not"), result.candidates);
+        assertEquals("not", result.contextCorrection);
+        assertNull(result.correction);
+        assertNull(result.bestSuggestion);
+        assertNull(english.suggest("bot", 5).contextCorrection);
+        assertNull(english.suggest("bot", 5, "the ").contextCorrection);
+        assertNull(english.suggest("bot", 5, "chat ").contextCorrection);
+        assertNull(english.suggest("hot", 5, "autocorrect is ").contextCorrection);
+        assertNull(english.suggest("pot", 5, "autocorrect is ").contextCorrection);
+        assertNull(english.suggest("Bot", 5, "autocorrect is ").contextCorrection);
+        assertNull(english.suggest("BOT", 5, "autocorrect is ").contextCorrection);
+        assertNull(english.suggest("bOt", 5, "autocorrect is ").contextCorrection);
+        assertNull(english.suggest("bot", 0, "autocorrect is ").contextCorrection);
+    }
+
+    @Test public void bundledEnglishContextHandlesRealSentencesAndSentenceBoundaries() throws Exception {
+        File file = new File("src/main/assets/swipe/en_context.tsv");
+        if (!file.isFile()) file = new File("app/src/main/assets/swipe/en_context.tsv");
+        TypingCorrector.ContextModel context;
+        try (FileInputStream input = new FileInputStream(file)) {
+            context = EnglishContextModel.load(input);
+        }
+        TypingCorrector english = new TypingCorrector(asset("en"), false, context);
+        assertEquals("autocorrect", english.suggest("autocrrect", 5, "the ").bestSuggestion);
+        TypingCorrector.Result isBot = english.suggest("bot", 5, "autocorrect is ");
+        assertTrue(isBot.exactWord);
+        assertEquals("not", isBot.contextCorrection);
+        assertEquals("not", isBot.candidates.get(1));
+        assertNull(english.suggest("bot", 5, "the ").contextCorrection);
+        assertNull(english.suggest("bot", 5, "chat ").contextCorrection);
+        assertNull(english.suggest("hot", 5, "it is ").contextCorrection);
+        assertNull(english.suggest("Bob", 5, "it is ").contextCorrection);
+        assertNull(english.suggest("bot", 5, "it is. ").contextCorrection);
+        assertNull(english.suggest("bot", 5, "it is\n").contextCorrection);
+    }
+
+    @Test public void contextDoesNotGuessFromWeakMissingOrConflictingEvidence() {
+        Counts counts = new Counts();
+        counts.put("weak ", "not", 8399, 0); // 40 times the missing-count bound is 8400.
+        counts.put("close ", "not", 10282, 0);
+        counts.put("close ", "bot", 260, 0);
+        counts.put("truncated ", "not", 1200, 0);
+        counts.put("truncated ", "bot", 29, 0);
+        counts.put("conflict ", "not", 10282, 0);
+        counts.put("conflict ", "bot", 0, 500);
+        counts.put("ambiguous ", "not", 10282, 0);
+        counts.put("ambiguous ", "hot", 9000, 0);
+        counts.put("different ", "cat", 500000, 0);
+        TypingCorrector english = new TypingCorrector(entries("bot", 944, "not", 4262273,
+                "hot", 123994, "cat", 100000), false, counts);
+        for (String context : Arrays.asList("weak ", "close ", "truncated ", "conflict ", "ambiguous ",
+                "different ", "missing ")) {
+            assertNull(context, english.suggest("bot", 5, context).contextCorrection);
+        }
+        TypingCorrector saved = new TypingCorrector(entries("bot", 944, "bot", 2000000,
+                "not", 4262273), false, counts);
+        counts.put("autocorrect is ", "not", 10282, 0);
+        assertNull(saved.suggest("bot", 5, "autocorrect is ").contextCorrection);
+        TypingCorrector name = new TypingCorrector(entries("Bot", 944, "not", 4262273), false, counts);
+        assertNull(name.suggest("bot", 5, "autocorrect is ").contextCorrection);
+    }
+
+    @Test public void contextCanRankMisspellingsWithoutWeakeningConfidenceOrKoreanProtection() {
+        Counts counts = new Counts();
+        counts.put("need ", "help", 100000, 0);
+        TypingCorrector english = new TypingCorrector(entries("hello", 3000, "help", 3000), false, counts);
+        assertEquals("hello", english.suggest("hellp", 5).bestSuggestion);
+        TypingCorrector.Result withContext = english.suggest("hellp", 5, "need ");
+        assertEquals("help", withContext.bestSuggestion);
+        assertEquals("help", withContext.candidates.get(1));
+        assertNull(withContext.correction);
+        assertNull(withContext.contextCorrection);
+
+        TypingCorrector korean = new TypingCorrector(entries("안녕하세요", 5000, "안녕하세여", 1), true, counts);
+        TypingCorrector.Result koreanExact = korean.suggest("안녕하세여", 3, "need ");
+        assertTrue(koreanExact.exactWord);
+        assertNull(koreanExact.contextCorrection);
+        assertNull(koreanExact.correction);
     }
 
     @Test public void topSuggestionUsesRankingRegardlessOfFrequencyFloorOrCandidateLimit() {
@@ -235,6 +330,23 @@ public class TypingCorrectorTest {
         List<Entry> entries = new ArrayList<>();
         for (int i = 0; i < values.length; i += 2) entries.add(new Entry((String) values[i], (Integer) values[i + 1]));
         return entries;
+    }
+
+    private static final class Counts implements TypingCorrector.ContextModel {
+        private final Map<String, TypingCorrector.ContextEvidence> counts = new HashMap<>();
+
+        void put(String preceding, String candidate, long bigram, long trigram) {
+            counts.put(preceding + "\u0000" + candidate,
+                    new TypingCorrector.ContextEvidence(bigram, trigram));
+        }
+
+        @Override public TypingCorrector.ContextEvidence score(String preceding, String candidate) {
+            TypingCorrector.ContextEvidence result = counts.get(preceding + "\u0000" + candidate);
+            return result == null ? new TypingCorrector.ContextEvidence(0, 0) : result;
+        }
+
+        @Override public long bigramOmittedUpperBound() { return 210; }
+        @Override public long trigramOmittedUpperBound() { return 130; }
     }
 
     private static List<Entry> asset(String language) {

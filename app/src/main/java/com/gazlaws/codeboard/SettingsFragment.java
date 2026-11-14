@@ -183,7 +183,9 @@ public class SettingsFragment extends PreferenceFragmentCompat implements IOnFoc
     private void showSwipeDictionaryCredits() {
         StringBuilder credits = new StringBuilder();
         try {
-            for (String asset : new String[] {"swipe/NOTICE.md", "swipe/LICENSE-CC-BY-SA-4.0.txt"}) {
+            for (String asset : new String[] {"swipe/NOTICE.md", "swipe/CONTEXT-NOTICE.md",
+                    "swipe/LICENSE-CC-BY-SA-4.0.txt", "swipe/LICENSE-CC-BY-4.0.txt",
+                    "swipe/LICENSE-CC-BY-3.0.txt"}) {
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                         requireContext().getAssets().open(asset), StandardCharsets.UTF_8))) {
                     String line;

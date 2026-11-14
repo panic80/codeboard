@@ -80,6 +80,103 @@ public class SwipeTypingControllerTest {
         assertEquals("hallo", text());
     }
 
+    @Test public void contextualSwipeCanResolveANearbyKeyAndHonorsTheUsersChoice() {
+        installContextFixture(null, false);
+        controller.setContextRankingEnabled(true);
+        setText("is ");
+        swipeAmbiguousBot();
+        finishWork();
+        assertEquals("is not", text());
+        assertEquals("not", candidateAt(0).getText().toString());
+        assertEquals("bot", candidateAt(1).getText().toString());
+        candidateAt(1).performClick();
+        controller.finish(connection, true);
+        assertEquals("is bot ", text());
+    }
+
+    @Test public void contextDoesNotOverruleAClearGestureOrAnUnrelatedPhrase() {
+        installContextFixture(null, false);
+        controller.setContextRankingEnabled(true);
+        setText("is ");
+        swipe("bot", false, false, false);
+        finishWork();
+        assertEquals("is bot", text());
+        controller.finish(connection, false);
+        setText("the ");
+        swipeAmbiguousBot();
+        finishWork();
+        assertEquals("the bot", text());
+    }
+
+    @Test public void disabledContextDoesNotReadEditorPrefixOrChangeSwipeRanking() {
+        installContextFixture(null, false);
+        setText("is ");
+        int reads = connection.beforeCalls;
+        swipeAmbiguousBot();
+        assertEquals(reads, connection.beforeCalls);
+        finishWork();
+        assertEquals("is bot", text());
+    }
+
+    @Test public void savedGeometryWinnerIsNotReplacedByContext() {
+        context.getSharedPreferences("personal_dictionary", Context.MODE_PRIVATE).edit().clear().commit();
+        PersonalDictionary personal = new PersonalDictionary(context);
+        assertTrue(personal.addWord("bot"));
+        installContextFixture(personal, false);
+        controller.setContextRankingEnabled(true);
+        setText("is ");
+        swipeAmbiguousBot();
+        finishWork();
+        assertEquals("is bot", text());
+        personal.removeWord("bot");
+    }
+
+    @Test public void unavailableContextFallsBackToGestureAndStaleContextIsRejected() {
+        installContextFixture(null, true);
+        controller.setContextRankingEnabled(true);
+        setText("is ");
+        swipeAmbiguousBot();
+        finishWork();
+        assertEquals("is bot", text());
+
+        installContextFixture(null, false);
+        controller.setContextRankingEnabled(true);
+        setText("is ");
+        swipeAmbiguousBot();
+        boolean[] ran = {false};
+        assertTrue(controller.deferIfDecoding(() -> ran[0] = true));
+        setText("us "); // The caret is unchanged, but the context no longer matches.
+        finishWork();
+        assertEquals("us ", text());
+        assertFalse(ran[0]);
+    }
+
+    private void installContextFixture(PersonalDictionary personal, boolean failContext) {
+        controller.close();
+        SwipeTypingController.DictionaryLoader loader = new SwipeTypingController.DictionaryLoader() {
+            @Override public List<Entry> load(boolean korean) {
+                return Arrays.asList(new Entry("bot", 944), new Entry("not", 4262273));
+            }
+            @Override public TypingCorrector.ContextModel loadContext() throws IOException {
+                if (failContext) throw new IOException("missing context");
+                return (previous, candidate) -> new TypingCorrector.ContextEvidence(
+                        previous.endsWith("is ") && candidate.equals("not") ? 10000 : 0, 0);
+            }
+        };
+        controller = new SwipeTypingController(provider, worker, null, loader,
+                new Handler(Looper.getMainLooper()), personal);
+        controller.setSuggestionStrip(strip);
+    }
+
+    private void swipeAmbiguousBot() {
+        Map<Character, KeyPosition> lookup = new HashMap<>();
+        for (KeyPosition key : keys) lookup.put(key.key, key);
+        KeyPosition b = lookup.get('b'), n = lookup.get('n'), o = lookup.get('o'), t = lookup.get('t');
+        controller.onSwipe(Arrays.asList(new Point(b.centerX + 0.3f * (n.centerX - b.centerX), b.centerY),
+                new Point(o.centerX, o.centerY), new Point(t.centerX, t.centerY)),
+                keys, false, false, false);
+    }
+
     @Test public void laterEventsWaitAndRunInOrderEvenAcrossASecondSwipe() {
         swipe("hello", false, false, false);
         List<String> order = new ArrayList<>();
@@ -347,8 +444,13 @@ public class SwipeTypingControllerTest {
 
     private static final class TestConnection extends BaseInputConnection {
         final EditText editor;
+        int beforeCalls;
         TestConnection(EditText editor) { super((View) editor, true); this.editor = editor; }
         @Override public Editable getEditable() { return editor.getText(); }
+        @Override public CharSequence getTextBeforeCursor(int length, int flags) {
+            beforeCalls++;
+            return super.getTextBeforeCursor(length, flags);
+        }
         @Override public ExtractedText getExtractedText(ExtractedTextRequest request, int flags) {
             ExtractedText text = new ExtractedText();
             text.selectionStart = Selection.getSelectionStart(editor.getText());

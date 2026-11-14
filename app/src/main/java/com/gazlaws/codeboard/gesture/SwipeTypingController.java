@@ -12,6 +12,7 @@ import com.gazlaws.codeboard.layout.ui.SuggestionStripView;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
@@ -31,6 +32,8 @@ public final class SwipeTypingController {
     private static final String TAG = "SwipeTypingController";
     private static final String DEFAULT_HINT = "Swipe across letters to type";
     private static final String NO_MATCH_HINT = "No match. Try again.";
+    private static final int CONTEXT_LIMIT = 256;
+    private static final double CONTEXT_SCALE = Math.log1p(10000);
 
     /** Supplies the current editor connection. Called on the main thread. */
     public interface ConnectionProvider {
@@ -39,6 +42,7 @@ public final class SwipeTypingController {
 
     interface DictionaryLoader {
         List<SwipeDecoder.Entry> load(boolean korean) throws IOException;
+        default TypingCorrector.ContextModel loadContext() throws IOException { return null; }
     }
 
     private final ConnectionProvider connections;
@@ -52,6 +56,8 @@ public final class SwipeTypingController {
 
     // These caches are only accessed by the single worker thread.
     private final List<SwipeDecoder.Entry>[] dictionaries;
+    private TypingCorrector.ContextModel contextModel;
+    private boolean contextModelLoaded;
     private final LinkedHashMap<Geometry, SwipeDecoder> decoders =
             new LinkedHashMap<Geometry, SwipeDecoder>(3, 0.75f, true) {
                 @Override protected boolean removeEldestEntry(Map.Entry<Geometry, SwipeDecoder> eldest) {
@@ -65,6 +71,7 @@ public final class SwipeTypingController {
     private String hint = DEFAULT_HINT;
     private boolean busy;
     private boolean closed;
+    private boolean contextRankingEnabled;
     private boolean applyingEditorChange;
     private SelectionSnapshot pendingSelection;
     private SelectionSnapshot composingSelection;
@@ -81,6 +88,12 @@ public final class SwipeTypingController {
     @SuppressWarnings("unchecked")
     SwipeTypingController(ConnectionProvider connections, Executor worker, ExecutorService ownedWorker,
                           DictionaryLoader loader, Handler mainHandler) {
+        this(connections, worker, ownedWorker, loader, mainHandler, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    SwipeTypingController(ConnectionProvider connections, Executor worker, ExecutorService ownedWorker,
+                          DictionaryLoader loader, Handler mainHandler, PersonalDictionary personalDictionary) {
         if (connections == null || worker == null || loader == null || mainHandler == null) {
             throw new IllegalArgumentException("Controller dependencies must not be null");
         }
@@ -90,7 +103,16 @@ public final class SwipeTypingController {
                 (worker instanceof ExecutorService ? (ExecutorService) worker : null);
         this.loader = loader;
         this.mainHandler = mainHandler;
+        this.personalDictionary = personalDictionary;
         dictionaries = (List<SwipeDecoder.Entry>[]) new List<?>[2];
+    }
+
+    /** Enables context ranking only where the active editor permits spelling assistance. */
+    public void setContextRankingEnabled(boolean enabled) {
+        if (contextRankingEnabled == enabled) return;
+        contextRankingEnabled = enabled;
+        // A result produced under the old setting must not be applied in a new editor mode.
+        if (busy) cancel(connections.get());
     }
 
     /** Installs or replaces the row; visibility remains controlled by the keyboard. */
@@ -124,6 +146,9 @@ public final class SwipeTypingController {
         }
         busy = true;
         pendingSelection = readSelection(connection);
+        final String previousContext = contextRankingEnabled && !korean &&
+                pendingSelection != null && pendingSelection.start == pendingSelection.end
+                ? readPreviousContext(connection) : null;
         final long token = ++generation;
         try {
             worker.execute(() -> {
@@ -150,7 +175,18 @@ public final class SwipeTypingController {
                         decoder = new SwipeDecoder(keyCopy, dictionaries[language]);
                         decoders.put(geometry, decoder);
                     }
-                    result = decoder.decode(pathCopy, 5);
+                    SwipeDecoder.ContextPrior prior = null;
+                    if (previousContext != null && !previousContext.isEmpty()) {
+                        if (!contextModelLoaded) {
+                            try { contextModel = loader.loadContext(); }
+                            catch (IOException | RuntimeException e) {
+                                Log.w(TAG, "Could not load the swipe context model", e);
+                            }
+                            contextModelLoaded = true;
+                        }
+                        prior = contextPrior(contextModel, previousContext, personalDictionary);
+                    }
+                    result = decoder.decode(pathCopy, 5, prior);
                 } catch (IOException | RuntimeException e) {
                     Log.w(TAG, "Could not decode swipe", e);
                 }
@@ -165,7 +201,8 @@ public final class SwipeTypingController {
                         }
                         return;
                     }
-                    onDecoded(token, connection, decoded, korean, capitalize, capsLock);
+                    onDecoded(token, connection, decoded, korean, capitalize, capsLock,
+                            previousContext);
                 });
             });
         } catch (RejectedExecutionException e) {
@@ -267,7 +304,8 @@ public final class SwipeTypingController {
     }
 
     private void onDecoded(long token, InputConnection connection, List<String> decoded,
-                           boolean korean, boolean capitalize, boolean capsLock) {
+                           boolean korean, boolean capitalize, boolean capsLock,
+                           String previousContext) {
         if (closed || token != generation) return;
         busy = false;
         SelectionSnapshot expectedSelection = pendingSelection;
@@ -282,6 +320,15 @@ public final class SwipeTypingController {
         if (expectedSelection != null && currentSelection != null &&
                 !expectedSelection.equals(currentSelection)) {
             // The editor can move before it delivers its selection-change callback.
+            deferred.clear();
+            finish(connection, false);
+            showHint(DEFAULT_HINT);
+            return;
+        }
+        if (previousContext != null && (currentSelection == null ||
+                !expectedSelection.equals(currentSelection) ||
+                !previousContext.equals(readPreviousContext(connection)))) {
+            // A same-position edit can change the context without a selection callback.
             deferred.clear();
             finish(connection, false);
             showHint(DEFAULT_HINT);
@@ -369,6 +416,48 @@ public final class SwipeTypingController {
                 || last == '?' || last == ':' || last == ';';
     }
 
+    private static String readPreviousContext(InputConnection connection) {
+        try {
+            CharSequence before = connection.getTextBeforeCursor(CONTEXT_LIMIT, 0);
+            return before == null ? null : before.toString();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static SwipeDecoder.ContextPrior contextPrior(TypingCorrector.ContextModel model,
+                                                           String previousContext,
+                                                           PersonalDictionary personalDictionary) {
+        if (model == null) return null;
+        final EnglishContextModel.PreparedContext prepared;
+        try {
+            prepared = model instanceof EnglishContextModel
+                    ? ((EnglishContextModel) model).prepare(previousContext) : null;
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Could not prepare swipe context", e);
+            return null;
+        }
+        return new SwipeDecoder.ContextPrior() {
+            @Override public double bonus(String candidate) {
+                try {
+                    TypingCorrector.ContextEvidence evidence = prepared != null
+                            ? prepared.score(candidate) : model.score(previousContext, candidate);
+                    if (evidence == null) return 0;
+                    long count = Math.max(evidence.bigramCount, evidence.trigramCount);
+                    return count <= 0 ? 0 : SwipeDecoder.MAX_CONTEXT_BONUS *
+                            Math.min(1.0, Math.log1p(count) / CONTEXT_SCALE);
+                } catch (RuntimeException e) {
+                    return 0;
+                }
+            }
+            @Override public boolean isProtected(String candidate) {
+                if (personalDictionary == null) return false;
+                try { return personalDictionary.contains(candidate); }
+                catch (RuntimeException e) { return true; }
+            }
+        };
+    }
+
     private static SelectionSnapshot readSelection(InputConnection connection) {
         if (connection == null) return null;
         try {
@@ -410,24 +499,31 @@ public final class SwipeTypingController {
     }
 
     private static DictionaryLoader assetLoader(Context context) {
-        return korean -> {
-            String name = korean ? "swipe/ko.tsv" : "swipe/en.tsv";
-            ArrayList<SwipeDecoder.Entry> result = new ArrayList<>();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                    context.getAssets().open(name), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    int tab = line.indexOf('\t');
-                    if (tab <= 0 || tab == line.length() - 1) continue;
-                    try {
-                        int frequency = Integer.parseInt(line.substring(tab + 1));
-                        result.add(new SwipeDecoder.Entry(line.substring(0, tab), frequency));
-                    } catch (NumberFormatException ignored) {
-                        // A corrupt row should not prevent the rest of the dictionary from loading.
-                    }
+        return new DictionaryLoader() {
+            @Override public TypingCorrector.ContextModel loadContext() throws IOException {
+                try (InputStream input = context.getAssets().open("swipe/en_context.tsv")) {
+                    return EnglishContextModel.load(input);
                 }
             }
-            return result;
+            @Override public List<SwipeDecoder.Entry> load(boolean korean) throws IOException {
+                String name = korean ? "swipe/ko.tsv" : "swipe/en.tsv";
+                ArrayList<SwipeDecoder.Entry> result = new ArrayList<>();
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                        context.getAssets().open(name), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        int tab = line.indexOf('\t');
+                        if (tab <= 0 || tab == line.length() - 1) continue;
+                        try {
+                            int frequency = Integer.parseInt(line.substring(tab + 1));
+                            result.add(new SwipeDecoder.Entry(line.substring(0, tab), frequency));
+                        } catch (NumberFormatException ignored) {
+                            // A corrupt row should not prevent the rest of the dictionary from loading.
+                        }
+                    }
+                }
+                return result;
+            }
         };
     }
 

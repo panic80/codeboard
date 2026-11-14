@@ -47,3 +47,11 @@ entirely of precomposed Hangul syllables U+AC00–U+D7A3, with source ordering
 and counts unchanged. A larger weight indicates a more frequent form. The
 subtitle-derived forms can include names, slang, misspellings, or offensive
 text.
+
+## Keyboard vocabulary supplement
+
+The adapted English list additionally includes 23 manually curated keyboard and
+input-method terms (including autocorrect, autocomplete, emoji and Dubeolsik)
+that were absent from the subtitle-derived vocabulary. Each added term has a
+synthetic weight of 5,000, not a corpus occurrence count. These additions are
+distributed with the adapted list under CC BY-SA 4.0.

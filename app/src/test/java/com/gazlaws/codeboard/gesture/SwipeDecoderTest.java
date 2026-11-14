@@ -44,6 +44,67 @@ public class SwipeDecoderTest {
         assertEquals("text", decoder.decode(pathFor(keys, "text"), 3).get(0));
     }
 
+    @Test public void contextCanResolveAmbiguousNeighboringStartKeys() {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries("bot", 944, "not", 4262273));
+        Map<Character, KeyPosition> lookup = byKey(keys);
+        KeyPosition b = lookup.get('b');
+        KeyPosition n = lookup.get('n');
+        List<Point> path = Arrays.asList(new Point(b.centerX + 0.3f * (n.centerX - b.centerX), b.centerY),
+                point(lookup.get('o')), point(lookup.get('t')));
+
+        assertEquals("bot", decoder.decode(path, 2).get(0));
+        assertEquals("not", decoder.decode(path, 2,
+                candidate -> candidate.equals("not") ? SwipeDecoder.MAX_CONTEXT_BONUS : 0).get(0));
+    }
+
+    @Test public void contextCannotOverruleAClearGestureOrExceedItsCap() {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries("bot", 944, "not", 4262273));
+        List<Point> clearBot = pathFor(keys, "bot");
+        List<String> bounded = decoder.decode(clearBot, 2,
+                candidate -> candidate.equals("not") ? SwipeDecoder.MAX_CONTEXT_BONUS : 0);
+        List<String> unboundedInput = decoder.decode(clearBot, 2,
+                candidate -> candidate.equals("not") ? Double.POSITIVE_INFINITY : 0);
+
+        assertEquals(Arrays.asList("bot", "not"), bounded);
+        assertEquals(bounded, unboundedInput);
+    }
+
+    @Test public void nullAndInvalidContextBonusesPreserveGeometryRanking() {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries("bot", 944, "not", 4262273));
+        List<Point> path = pathFor(keys, "bot");
+        List<String> original = decoder.decode(path, 2);
+
+        assertEquals(original, decoder.decode(path, 2, null));
+        assertEquals(original, decoder.decode(path, 2, candidate -> Double.NaN));
+        assertEquals(original, decoder.decode(path, 2, candidate -> -100));
+        assertEquals(original, decoder.decode(path, 2, candidate -> 0));
+    }
+
+    @Test public void protectedGeometryWinnerKeepsTheOriginalRanking() {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries("bot", 944, "not", 4262273));
+        Map<Character, KeyPosition> lookup = byKey(keys);
+        KeyPosition b = lookup.get('b');
+        KeyPosition n = lookup.get('n');
+        List<Point> path = Arrays.asList(new Point(b.centerX + 0.3f * (n.centerX - b.centerX), b.centerY),
+                point(lookup.get('o')), point(lookup.get('t')));
+        SwipeDecoder.ContextPrior preferNot = new SwipeDecoder.ContextPrior() {
+            @Override public double bonus(String candidate) {
+                return candidate.equals("not") ? SwipeDecoder.MAX_CONTEXT_BONUS : 0;
+            }
+
+            @Override public boolean isProtected(String candidate) {
+                return candidate.equals("bot");
+            }
+        };
+
+        assertEquals(Arrays.asList("bot", "not"), decoder.decode(path, 2));
+        assertEquals(decoder.decode(path, 2), decoder.decode(path, 2, preferNot));
+    }
+
     @Test public void aPauseAtAKeyCanIndicateARepeatedLetter() {
         List<KeyPosition> keys = qwerty();
         SwipeDecoder decoder = new SwipeDecoder(keys, entries("helo", 100, "hello", 100));
@@ -84,6 +145,8 @@ public class SwipeDecoderTest {
         assertEquals("안녕", decoder.decode(pathFor(keys, "dkssud"), 3).get(0));
         assertEquals("한글", decoder.decode(pathFor(keys, "gksrmf"), 3).get(0));
         assertEquals("꼬리", decoder.decode(pathFor(keys, "Rhf l".replace(" ", "")), 3).get(0));
+        assertEquals(decoder.decode(pathFor(keys, "dkssud"), 3),
+                decoder.decode(pathFor(keys, "dkssud"), 3, null));
     }
 
     @Test public void usesTheSuppliedGeometryRatherThanAssumingQwerty() {
