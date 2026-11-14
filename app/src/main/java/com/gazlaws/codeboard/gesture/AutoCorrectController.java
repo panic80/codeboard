@@ -74,6 +74,13 @@ public final class AutoCorrectController {
     private boolean autoCorrectionEnabled = true;
     private boolean wordProtected;
     private long generation;
+    // Some editors support surrounding text but not getExtractedText(). In those editors we
+    // retain a caret only while the editor and its surrounding text remain accounted for.
+    private InputConnection fallbackConnection;
+    private Snapshot fallbackSelection;
+    private Surrounding fallbackSurrounding;
+    private ManualEdit manualEdit;
+    private final ArrayDeque<FallbackTransition> pendingFallbackTransitions = new ArrayDeque<>();
 
     public AutoCorrectController(Context context, ConnectionProvider connections, Runnable beforeEdit) {
         this(connections, beforeEdit, Executors.newSingleThreadExecutor(), null,
@@ -113,6 +120,50 @@ public final class AutoCorrectController {
         }
     }
 
+    /** Seeds a caret reported by EditorInfo for an editor that cannot return extracted text. */
+    public void onStartInput(InputConnection connection, int start, int end) {
+        cancel();
+        clearFallback();
+        if (closed || connection == null || connection != connections.get() || start < 0 || start != end) return;
+        Surrounding surrounding = readSurrounding(connection);
+        if (!fitsSelection(surrounding, start)) return;
+        setFallback(connection, start, surrounding);
+    }
+
+    /** Records the verified editor context immediately before a manual keyboard edit. */
+    public void beforeManualEdit() {
+        manualEdit = null;
+        InputConnection connection = connections.get();
+        if (closed || connection == null || connection != fallbackConnection || fallbackSelection == null) return;
+        ContextText current = readContext(connection);
+        if (current == null) {
+            clearFallback();
+            return;
+        }
+        // If extracted selection is available it is authoritative, including its document offset.
+        int position = current.selection.offset + current.selection.start;
+        Surrounding surrounding = new Surrounding(current.before, current.after);
+        if (!fitsSelection(surrounding, position)) {
+            clearFallback();
+            return;
+        }
+        setFallback(connection, position, surrounding);
+        manualEdit = new ManualEdit(connection, position, surrounding);
+    }
+
+    /** Discards the caret before an editor mutation that the controller does not track. */
+    public void invalidateEditorPosition() {
+        cancel();
+        clearFallback();
+    }
+
+    /** Completes a normal space that the caller inserted after commitSpace returned false. */
+    public void onManualSpaceInserted() {
+        if (closed) return;
+        finishManualEdit("", " ");
+        cancel();
+    }
+
     /** Controls automatic replacement without disabling manual suggestions or learning. */
     public void setAutoCorrectionEnabled(boolean enabled) {
         if (autoCorrectionEnabled == enabled) return;
@@ -130,6 +181,7 @@ public final class AutoCorrectController {
     /** Called immediately after the IME inserts a manual letter or updates a Hangul syllable. */
     public void onTypedTextUpdated(boolean korean) {
         if (closed) return;
+        finishManualTyping(korean);
         invalidateBoundary();
         if (blocked) { blockedSelection = selection(connections.get()); return; }
         InputConnection connection = connections.get();
@@ -165,6 +217,7 @@ public final class AutoCorrectController {
     /** Called immediately after a manually entered nonletter. Sentence punctuation is retained. */
     public void onNonLetterTyped() {
         if (closed) return;
+        finishManualTyping(false);
         invalidateBoundary();
         if (blocked) { blockedSelection = selection(connections.get()); return; }
         ContextText text = readContext(connections.get());
@@ -187,6 +240,7 @@ public final class AutoCorrectController {
     /** Called after ordinary backspace, including Hangul's intermediate composing updates. */
     public void onBackspaceTyped(boolean korean) {
         if (closed) return;
+        finishManualBackspace(korean);
         invalidateBoundary();
         if (blocked) { blockedSelection = selection(connections.get()); return; }
         if (word == null || this.korean != korean) return;
@@ -231,10 +285,12 @@ public final class AutoCorrectController {
         int version = dictionaryVersion();
         long token = ++generation;
         cancelQueuedSuggestions();
+        beforeManualEdit();
         applyingEdit = true;
         boolean inserted;
         try { inserted = connection.commitText(" ", 1); }
         finally { applyingEdit = false; }
+        finishManualEdit("", inserted ? " " : "");
         clearWord(); blocked = false; blockedSelection = null;
         clearSuggestions();
         if (!inserted) return false;
@@ -274,8 +330,14 @@ public final class AutoCorrectController {
 
     /** Invalidates a word if the actual editor selection moves away from its tracked location. */
     public void onSelectionChanged(int oldStart, int oldEnd, int newStart, int newEnd, int candidatesEnd) {
-        if (closed || applyingEdit) return;
+        if (closed) return;
+        if (manualEdit != null) {
+            manualEdit.recordSelection(oldStart, oldEnd, newStart, newEnd);
+            return;
+        }
+        if (applyingEdit) return;
         InputConnection connection = connections.get();
+        updateFallbackSelection(connection, oldStart, oldEnd, newStart, newEnd);
         Snapshot actual = selection(connection);
         if (blocked && word == null && boundary == null && !busy) {
             if (blockedSelection == null || !blockedSelection.equals(actual)) {
@@ -302,12 +364,14 @@ public final class AutoCorrectController {
         clearWord(); blocked = false; blockedSelection = null; boundary = null; busy = false;
         deferred.clear();
         clearSuggestions();
+        manualEdit = null;
     }
 
     public void close() {
         if (closed) return;
         cancel();
         closed = true;
+        clearFallback();
         if (ownedWorker != null) ownedWorker.shutdownNow();
         strip = null;
     }
@@ -557,6 +621,7 @@ public final class AutoCorrectController {
         InputConnection connection = wordConnection;
         if (!validTrackedText(readContext(connection))) return;
         String replace = word + punctuation;
+        beforeManualEdit();
         applyingEdit = true;
         connection.beginBatchEdit();
         boolean changed;
@@ -567,6 +632,7 @@ public final class AutoCorrectController {
                 changed = false;
             }
         } finally { connection.endBatchEdit(); applyingEdit = false; }
+        finishManualEdit(changed ? replace : "", changed ? candidate + punctuation : "");
         if (!changed) return;
         word = candidate;
         ContextText text = readContext(connection);
@@ -615,6 +681,7 @@ public final class AutoCorrectController {
         InputConnection connection = current.connection;
         String old = current.output + current.punctuation + " ";
         String next = replacement + current.punctuation + " ";
+        beforeManualEdit();
         applyingEdit = true;
         connection.beginBatchEdit();
         boolean changed;
@@ -625,6 +692,7 @@ public final class AutoCorrectController {
                 changed = false;
             }
         } finally { connection.endBatchEdit(); applyingEdit = false; }
+        finishManualEdit(changed ? old : "", changed ? next : "");
         if (!changed) return false;
         current.output = replacement;
         current.selection = selection(connection);
@@ -752,25 +820,194 @@ public final class AutoCorrectController {
         return value.substring(Math.max(0, value.length() - limit));
     }
 
-    private static ContextText readContext(InputConnection connection) {
+    private ContextText readContext(InputConnection connection) {
         if (connection == null) return null;
         try {
-            Snapshot selection = selection(connection);
-            CharSequence before = connection.getTextBeforeCursor(CONTEXT_LIMIT, 0);
-            CharSequence after = connection.getTextAfterCursor(CONTEXT_LIMIT, 0);
-            if (selection == null || before == null || after == null) return null;
-            return new ContextText(before.toString(), after.toString(), selection);
+            SelectionRead selection = readSelection(connection);
+            Surrounding surrounding = readSurrounding(connection);
+            if (selection == null || selection.snapshot == null || surrounding == null) return null;
+            if (selection.fallback && (!surrounding.equals(fallbackSurrounding) ||
+                    !fitsSelection(surrounding, selection.snapshot.start))) {
+                clearFallback();
+                return null;
+            }
+            return new ContextText(surrounding.before, surrounding.after, selection.snapshot);
         } catch (RuntimeException e) { return null; }
     }
 
-    private static Snapshot selection(InputConnection connection) {
+    private Snapshot selection(InputConnection connection) {
+        if (connection == null) return null;
+        SelectionRead read = readSelection(connection);
+        if (read == null || read.snapshot == null) return null;
+        if (read.fallback) {
+            Surrounding surrounding = readSurrounding(connection);
+            if (!surroundingEqualsFallback(surrounding, read.snapshot.start)) {
+                clearFallback();
+                return null;
+            }
+        }
+        return read.snapshot;
+    }
+
+    private SelectionRead readSelection(InputConnection connection) {
+        if (connection == null) return null;
+        ExtractedText extracted = null;
+        try { extracted = connection.getExtractedText(new ExtractedTextRequest(), 0); }
+        catch (RuntimeException ignored) { }
+        if (extracted != null) {
+            if (extracted.selectionStart < 0 || extracted.selectionStart != extracted.selectionEnd) {
+                return new SelectionRead(null, false);
+            }
+            return new SelectionRead(new Snapshot(extracted.startOffset, extracted.selectionStart), false);
+        }
+        if (connection != fallbackConnection || fallbackSelection == null) return null;
+        return new SelectionRead(fallbackSelection, true);
+    }
+
+    private static Surrounding readSurrounding(InputConnection connection) {
         if (connection == null) return null;
         try {
-            ExtractedText extracted = connection.getExtractedText(new ExtractedTextRequest(), 0);
-            if (extracted == null || extracted.selectionStart < 0 ||
-                    extracted.selectionStart != extracted.selectionEnd) return null;
-            return new Snapshot(extracted.startOffset, extracted.selectionStart);
+            CharSequence before = connection.getTextBeforeCursor(CONTEXT_LIMIT, 0);
+            CharSequence after = connection.getTextAfterCursor(CONTEXT_LIMIT, 0);
+            return before == null || after == null ? null : new Surrounding(before.toString(), after.toString());
         } catch (RuntimeException e) { return null; }
+    }
+
+    private static boolean fitsSelection(Surrounding text, int position) {
+        return text != null && position >= 0 && text.before.length() == Math.min(position, CONTEXT_LIMIT);
+    }
+
+    private boolean surroundingEqualsFallback(Surrounding surrounding, int position) {
+        return fitsSelection(surrounding, position) && surrounding.equals(fallbackSurrounding);
+    }
+
+    private void setFallback(InputConnection connection, int position, Surrounding surrounding) {
+        if (fallbackConnection != connection) pendingFallbackTransitions.clear();
+        fallbackConnection = connection;
+        fallbackSelection = new Snapshot(0, position);
+        fallbackSurrounding = surrounding;
+    }
+
+    private void clearFallback() {
+        fallbackConnection = null;
+        fallbackSelection = null;
+        fallbackSurrounding = null;
+        manualEdit = null;
+        pendingFallbackTransitions.clear();
+    }
+
+    private void updateFallbackSelection(InputConnection connection, int oldStart, int oldEnd,
+                                         int start, int end) {
+        if (connection == null) { clearFallback(); return; }
+        SelectionRead actual = readSelection(connection);
+        if (actual != null && !actual.fallback) {
+            if (actual.snapshot == null) { clearFallback(); return; }
+            int position = actual.snapshot.offset + actual.snapshot.start;
+            Surrounding surrounding = readSurrounding(connection);
+            pendingFallbackTransitions.clear();
+            if (fitsSelection(surrounding, position)) setFallback(connection, position, surrounding);
+            else clearFallback();
+            return;
+        }
+        if (start < 0 || start != end) { clearFallback(); return; }
+        Surrounding surrounding = readSurrounding(connection);
+        if (fallbackConnection == connection && fallbackSelection != null &&
+                surroundingEqualsFallback(surrounding, fallbackSelection.start)) {
+            // Updates can be delayed or coalesced. Ignore only a transition caused by our own
+            // verified edits, consuming it so later movement to an old position is not ignored.
+            boolean expected = oldStart == oldEnd && consumeFallbackTransitions(oldStart, start);
+            if (start == fallbackSelection.start) {
+                if (!expected) pendingFallbackTransitions.clear();
+                return;
+            }
+            if (expected) return;
+        }
+        pendingFallbackTransitions.clear();
+        if (fitsSelection(surrounding, start)) setFallback(connection, start, surrounding);
+        else clearFallback();
+    }
+
+    private boolean consumeFallbackTransitions(int oldStart, int newStart) {
+        int index = 0, match = -1;
+        int previous = oldStart;
+        for (FallbackTransition transition : pendingFallbackTransitions) {
+            if (transition.before != previous) break;
+            previous = transition.after;
+            if (previous == newStart) { match = index; break; }
+            index++;
+        }
+        if (match < 0) return false;
+        for (int i = 0; i <= match; i++) pendingFallbackTransitions.removeFirst();
+        return true;
+    }
+
+    private void finishManualTyping(boolean korean) {
+        ManualEdit edit = manualEdit;
+        if (edit == null) return;
+        Surrounding after = readSurrounding(edit.connection);
+        if (after == null || after.before.isEmpty()) { clearFallback(); return; }
+        if (korean && word != null && punctuation.isEmpty()) {
+            finishManualEdit(word, letterSuffix(after.before));
+        } else {
+            finishManualEdit("", after.before.substring(after.before.length() - 1));
+        }
+    }
+
+    private void finishManualBackspace(boolean korean) {
+        ManualEdit edit = manualEdit;
+        if (edit == null) return;
+        Surrounding after = readSurrounding(edit.connection);
+        if (after == null) { clearFallback(); return; }
+        if (korean && word != null && punctuation.isEmpty()) {
+            String current = letterSuffix(after.before);
+            if (!current.isEmpty() && current.length() == word.length() &&
+                    validBackspaceUpdate(word, current, true)) {
+                finishManualEdit(word, current);
+                return;
+            }
+        }
+        if (edit.surrounding.before.isEmpty()) {
+            finishManualEdit("", "");
+            return;
+        }
+        String before = edit.surrounding.before;
+        int length = Character.charCount(before.codePointBefore(before.length()));
+        finishManualEdit(before.substring(before.length() - length), "");
+    }
+
+    private void finishManualEdit(String removed, String inserted) {
+        ManualEdit edit = manualEdit;
+        manualEdit = null;
+        if (edit == null) return;
+        if (edit.connection != connections.get() || edit.connection != fallbackConnection ||
+                fallbackSelection == null || fallbackSelection.start != edit.position ||
+                !edit.surrounding.equals(fallbackSurrounding)) {
+            clearFallback();
+            return;
+        }
+        Surrounding after = readSurrounding(edit.connection);
+        int nextPosition = edit.position - removed.length() + inserted.length();
+        if (!fitsSelection(after, nextPosition) || !edit.surrounding.after.equals(after.after) ||
+                !edit.surrounding.before.endsWith(removed)) {
+            clearFallback();
+            return;
+        }
+        String projected = edit.surrounding.before.substring(0,
+                edit.surrounding.before.length() - removed.length()) + inserted;
+        // Deletions at the context limit can reveal older characters on the left. Everything
+        // still visible from the old window must match, as must the untouched right side.
+        boolean matches = after.before.length() <= projected.length()
+                ? after.before.equals(tail(projected, after.before.length()))
+                : after.before.endsWith(projected);
+        if (!matches) { clearFallback(); return; }
+        setFallback(edit.connection, nextPosition, after);
+        if (nextPosition != edit.position || !edit.surrounding.equals(after)) {
+            pendingFallbackTransitions.addLast(new FallbackTransition(edit.position, nextPosition));
+            while (pendingFallbackTransitions.size() > CONTEXT_LIMIT) pendingFallbackTransitions.removeFirst();
+        }
+        if (edit.notified) {
+            updateFallbackSelection(edit.connection, edit.oldStart, edit.oldEnd, edit.newStart, edit.newEnd);
+        }
     }
 
     private static PersonalWordStore personalWordStore(PersonalDictionary personal) {
@@ -816,6 +1053,44 @@ public final class AutoCorrectController {
         ContextText(String before, String after, Snapshot selection) {
             this.before = before; this.after = after; this.selection = selection;
         }
+    }
+
+    private static final class Surrounding {
+        final String before, after;
+        Surrounding(String before, String after) { this.before = before; this.after = after; }
+        @Override public boolean equals(Object other) {
+            if (!(other instanceof Surrounding)) return false;
+            Surrounding that = (Surrounding) other;
+            return before.equals(that.before) && after.equals(that.after);
+        }
+        @Override public int hashCode() { return 31 * before.hashCode() + after.hashCode(); }
+    }
+
+    private static final class SelectionRead {
+        final Snapshot snapshot;
+        final boolean fallback;
+        SelectionRead(Snapshot snapshot, boolean fallback) { this.snapshot = snapshot; this.fallback = fallback; }
+    }
+
+    private static final class ManualEdit {
+        final InputConnection connection;
+        final int position;
+        final Surrounding surrounding;
+        boolean notified;
+        int oldStart, oldEnd, newStart, newEnd;
+        ManualEdit(InputConnection connection, int position, Surrounding surrounding) {
+            this.connection = connection; this.position = position; this.surrounding = surrounding;
+        }
+        void recordSelection(int oldStart, int oldEnd, int newStart, int newEnd) {
+            this.notified = true;
+            this.oldStart = oldStart; this.oldEnd = oldEnd;
+            this.newStart = newStart; this.newEnd = newEnd;
+        }
+    }
+
+    private static final class FallbackTransition {
+        final int before, after;
+        FallbackTransition(int before, int after) { this.before = before; this.after = after; }
     }
 
     private static final class Snapshot {

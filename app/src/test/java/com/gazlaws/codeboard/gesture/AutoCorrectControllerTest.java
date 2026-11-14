@@ -569,6 +569,163 @@ public class AutoCorrectControllerTest {
         assertLearning("Saved", false);
     }
 
+    @Test public void missingExtractedTextStillSupportsSuggestionsLearningAndCorrection() {
+        enableFallback();
+        typeFallback("teh");
+        drain();
+        assertEquals("teh", candidate(0));
+        assertEquals("the", candidate(1));
+        assertLearning("Add word", true);
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("the ", text());
+        assertLearning("Add word", true);
+        learn();
+        assertEquals("teh ", text());
+        assertEquals(Arrays.asList("teh"), personal.getWords());
+        assertLearning("Saved", false);
+    }
+
+    @Test public void missingExtractedTextDoesNotTrustChangedTextCaretOrConnection() {
+        enableFallback();
+        typeFallback("teh");
+        View.OnClickListener moved = learningListener();
+        Selection.setSelection(editor.getText(), 0);
+        moved.onClick(learningAction());
+        assertTrue(personal.getWords().isEmpty());
+
+        setText("");
+        controller.onStartInput(connection, 0, 0);
+        typeFallback("teh");
+        View.OnClickListener changed = learningListener();
+        editor.getText().replace(0, 3, "xyz");
+        changed.onClick(learningAction());
+        assertTrue(personal.getWords().isEmpty());
+
+        setText("");
+        controller.onStartInput(connection, 0, 0);
+        typeFallback("teh");
+        View.OnClickListener switched = learningListener();
+        EditText other = new EditText(context);
+        other.setText("teh");
+        Selection.setSelection(other.getText(), 3);
+        provider.current = new TestConnection(other);
+        switched.onClick(learningAction());
+        assertTrue(personal.getWords().isEmpty());
+    }
+
+    @Test public void missingExtractedTextNeedsKnownCollapsedSelectionAndBothSides() {
+        connection.noExtractedText = true;
+        controller.onStartInput(connection, -1, -1);
+        typeFallback("teh");
+        assertEquals(0, strip.getCandidateCount());
+        assertFalse(controller.commitSpace());
+
+        setText("");
+        controller.onStartInput(connection, 0, 1);
+        typeFallback("teh");
+        assertEquals(0, strip.getCandidateCount());
+        setText("");
+        connection.noAfter = true;
+        controller.onStartInput(connection, 0, 0);
+        typeFallback("teh");
+        assertEquals(0, strip.getCandidateCount());
+        connection.noAfter = false;
+        setText("");
+        connection.noBefore = true;
+        controller.onStartInput(connection, 0, 0);
+        typeFallback("teh");
+        assertEquals(0, strip.getCandidateCount());
+    }
+
+    @Test public void fallbackHandlesDelayedCallbacksAndLongContexts() {
+        StringBuilder prefix = new StringBuilder();
+        for (int i = 0; i < 300; i++) prefix.append('x');
+        prefix.append(' ');
+        setText(prefix.toString());
+        connection.noExtractedText = true;
+        controller.onStartInput(connection, 301, 301);
+        typeFallback("teh");
+        controller.onSelectionChanged(301, 301, 302, 302, -1);
+        controller.onSelectionChanged(302, 302, 303, 303, -1);
+        controller.onSelectionChanged(303, 303, 304, 304, -1);
+        drain();
+        assertEquals("teh", candidate(0));
+        assertLearning("Add word", true);
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals(prefix + "the ", text());
+    }
+
+    @Test public void fallbackTracksKoreanCompositionAndBackspace() {
+        enableFallback();
+        controller.beforeManualEdit();
+        compose("ㅇ");
+        controller.beforeManualEdit();
+        compose("아");
+        controller.beforeManualEdit();
+        compose("안");
+        assertLearning("Add word", true);
+        controller.beforeManualEdit();
+        connection.setComposingText("아", 1);
+        controller.onBackspaceTyped(true);
+        assertEquals("아", text());
+        assertLearning("Add word", true);
+        learn();
+        assertEquals(Arrays.asList("아"), personal.getWords());
+    }
+
+    @Test public void fallbackAcceptsSelectionCallbackDuringManualEdit() {
+        enableFallback();
+        controller.beforeManualEdit();
+        connection.commitText("t", 1);
+        controller.onSelectionChanged(0, 0, 1, 1, -1);
+        controller.onTypedTextUpdated(false);
+        typeFallback("eh");
+        assertLearning("Add word", true);
+        drain();
+        assertEquals("teh", candidate(0));
+        assertEquals("the", candidate(1));
+    }
+
+    @Test public void untrackedLeadingSpaceRetainsCaretForTheNextWord() {
+        enableFallback();
+        assertFalse(controller.commitSpace());
+        controller.beforeManualEdit();
+        connection.commitText(" ", 1);
+        controller.onManualSpaceInserted();
+        typeFallback("teh");
+        controller.onSelectionChanged(0, 0, 4, 4, -1);
+        assertLearning("Add word", true);
+        drain();
+        assertEquals(" teh", text());
+        assertEquals("teh", candidate(0));
+    }
+
+    @Test public void invalidatingFallbackRequiresANewSelectionReport() {
+        enableFallback();
+        controller.invalidateEditorPosition();
+        typeFallback("x");
+        assertEquals(0, strip.getCandidateCount());
+        setText("");
+        controller.onSelectionChanged(1, 1, 0, 0, -1);
+        typeFallback("teh");
+        assertLearning("Add word", true);
+    }
+
+    private void enableFallback() {
+        connection.noExtractedText = true;
+        controller.onStartInput(connection, 0, 0);
+    }
+
+    private void typeFallback(String letters) {
+        for (char c : letters.toCharArray()) {
+            controller.beforeManualEdit();
+            connection.commitText(String.valueOf(c), 1);
+            controller.onTypedTextUpdated(false);
+        }
+    }
+
     private void type(String letters) {
         for (char c : letters.toCharArray()) {
             connection.commitText(String.valueOf(c), 1);
@@ -656,13 +813,21 @@ public class AutoCorrectControllerTest {
 
     private static final class TestConnection extends BaseInputConnection {
         final EditText editor;
+        boolean noExtractedText, noBefore, noAfter;
         TestConnection(EditText editor) { super((View) editor, true); this.editor = editor; }
         @Override public Editable getEditable() { return editor.getText(); }
         @Override public ExtractedText getExtractedText(ExtractedTextRequest request, int flags) {
+            if (noExtractedText) return null;
             ExtractedText text = new ExtractedText();
             text.selectionStart = Selection.getSelectionStart(editor.getText());
             text.selectionEnd = Selection.getSelectionEnd(editor.getText());
             return text;
+        }
+        @Override public CharSequence getTextBeforeCursor(int n, int flags) {
+            return noBefore ? null : super.getTextBeforeCursor(n, flags);
+        }
+        @Override public CharSequence getTextAfterCursor(int n, int flags) {
+            return noAfter ? null : super.getTextAfterCursor(n, flags);
         }
     }
 

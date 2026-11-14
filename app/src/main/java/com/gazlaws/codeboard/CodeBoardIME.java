@@ -92,6 +92,8 @@ public class CodeBoardIME extends InputMethodService
     private boolean swipeTypingEnabled = true;
     private boolean autoCorrectEnabled = true;
     private boolean spellingSuggestionsEnabled = true;
+    private int editorSelectionStart = -1;
+    private int editorSelectionEnd = -1;
     private SwipeTypingController swipeTypingController;
     private AutoCorrectController autoCorrectController;
     private SuggestionStripView swipeSuggestions;
@@ -115,6 +117,10 @@ public class CodeBoardIME extends InputMethodService
         if (autoCorrectController != null && primaryCode != 16 && primaryCode != 32
                 && primaryCode != -5 && (!typingAssistAvailable || primaryCode < 32 || primaryCode > 126)) {
             autoCorrectController.cancel();
+            if (primaryCode != 17 && primaryCode != -1
+                    && primaryCode != Definitions.CODE_LANGUAGE_SWITCH) {
+                autoCorrectController.invalidateEditorPosition();
+            }
         }
         if (swipeTypingController != null && primaryCode != 16 && primaryCode != -5) {
             boolean letter = primaryCode >= 'a' && primaryCode <= 'z'
@@ -240,6 +246,10 @@ public class CodeBoardIME extends InputMethodService
                     }
                 }
                 //Now shift/ctrl metadata is set
+                if (primaryCode == -5 && (meta & KeyEvent.META_CTRL_ON) != 0
+                        && autoCorrectController != null) {
+                    autoCorrectController.invalidateEditorPosition();
+                }
                 if (primaryCode == -5 && (meta & KeyEvent.META_CTRL_ON) == 0
                         && autoCorrectController != null && autoCorrectController.undoCorrection()) {
                     break;
@@ -252,6 +262,7 @@ public class CodeBoardIME extends InputMethodService
                     swipeTypingController.finish(ic, false);
                 }
                 if (koreanLetter) {
+                    if (typingAssistAvailable) autoCorrectController.beforeManualEdit();
                     updateKoreanComposition(ic, hangulComposer.input(KoreanKeyMap.toJamo(code)));
                     if (typingAssistAvailable && autoCorrectController != null) {
                         autoCorrectController.onTypedTextUpdated(true);
@@ -260,6 +271,7 @@ public class CodeBoardIME extends InputMethodService
                 }
                 if (primaryCode == -5 && (meta & KeyEvent.META_CTRL_ON) == 0
                         && hangulComposer.hasComposition()) {
+                    if (typingAssistAvailable) autoCorrectController.beforeManualEdit();
                     updateKoreanComposition(ic, hangulComposer.backspace());
                     if (typingAssistAvailable && autoCorrectController != null) {
                         autoCorrectController.onBackspaceTyped(true);
@@ -269,11 +281,13 @@ public class CodeBoardIME extends InputMethodService
                 finishKoreanComposition(ic);
                 if (typingAssistAvailable && (meta & KeyEvent.META_CTRL_ON) == 0) {
                     if (primaryCode == -5) {
+                        autoCorrectController.beforeManualEdit();
                         deleteTypedCharacter(ic);
                         autoCorrectController.onBackspaceTyped(koreanLayoutSelected && koreanMode);
                         break;
                     }
                     if (primaryCode >= 33 && primaryCode <= 126) {
+                        autoCorrectController.beforeManualEdit();
                         ic.commitText(String.valueOf(code), 1);
                         if (Character.isLetter(code)) autoCorrectController.onTypedTextUpdated(false);
                         else autoCorrectController.onNonLetterTyped();
@@ -405,6 +419,7 @@ public class CodeBoardIME extends InputMethodService
                 }
             }
         }
+        refreshSuggestionHint();
     }
 
     public void onPress(final int primaryCode) {
@@ -475,6 +490,7 @@ public class CodeBoardIME extends InputMethodService
         if (focusChanged) finishKoreanComposition(getCurrentInputConnection());
         super.onViewClicked(focusChanged);
         clearLongPressTimer();
+        refreshSuggestionHint();
     }
 
     public void onRelease(int primaryCode) {
@@ -497,7 +513,14 @@ public class CodeBoardIME extends InputMethodService
                 finishKoreanComposition(ic);
                 if (!isTypingAssistAvailable() || autoCorrectController == null
                         || !autoCorrectController.commitSpace()) {
-                    ic.commitText(String.valueOf((char) primaryCode), 1);
+                    boolean trackSpace = isTypingAssistAvailable() && autoCorrectController != null;
+                    if (trackSpace) autoCorrectController.beforeManualEdit();
+                    else if (autoCorrectController != null) autoCorrectController.invalidateEditorPosition();
+                    boolean inserted = ic.commitText(String.valueOf((char) primaryCode), 1);
+                    if (trackSpace) {
+                        if (inserted) autoCorrectController.onManualSpaceInserted();
+                        else autoCorrectController.invalidateEditorPosition();
+                    }
                 }
             }
         }
@@ -558,7 +581,10 @@ public class CodeBoardIME extends InputMethodService
         if (deferPendingInput(() -> onText(value))) return;
         InputConnection ic = getCurrentInputConnection();
         if (ic != null) {
-            if (autoCorrectController != null) autoCorrectController.cancel();
+            if (autoCorrectController != null) {
+                autoCorrectController.cancel();
+                autoCorrectController.invalidateEditorPosition();
+            }
             if (swipeTypingController != null) swipeTypingController.finish(ic, false);
             finishKoreanComposition(ic);
             ic.commitText(text, 1);
@@ -743,6 +769,7 @@ public class CodeBoardIME extends InputMethodService
                 swipeSuggestions = new SuggestionStripView(this, mKeyboardUiFactory.theme);
                 swipeTypingController.setSuggestionStrip(swipeSuggestions);
                 if (spellingSuggestionsEnabled || autoCorrectEnabled) {
+                    boolean created = false;
                     if (autoCorrectController == null) {
                         autoCorrectController = new AutoCorrectController(this,
                                 new AutoCorrectController.ConnectionProvider() {
@@ -750,9 +777,11 @@ public class CodeBoardIME extends InputMethodService
                                         return getCurrentInputConnection();
                                     }
                                 }, () -> finishKoreanComposition(getCurrentInputConnection()));
+                        created = true;
                     }
                     autoCorrectController.setAutoCorrectionEnabled(autoCorrectEnabled);
                     autoCorrectController.setSuggestionStrip(spellingSuggestionsEnabled ? swipeSuggestions : null);
+                    if (created) seedTypingAssistEditor();
                 } else if (autoCorrectController != null) {
                     autoCorrectController.cancel();
                     autoCorrectController.setSuggestionStrip(null);
@@ -803,6 +832,9 @@ public class CodeBoardIME extends InputMethodService
         cancelTypingState();
         finishKoreanComposition(getCurrentInputConnection());
         sEditorInfo = attribute;
+        editorSelectionStart = attribute.initialSelStart;
+        editorSelectionEnd = attribute.initialSelEnd;
+        seedTypingAssistEditor();
         updateSwipeAvailability();
     }
 
@@ -826,13 +858,20 @@ public class CodeBoardIME extends InputMethodService
                                   int newSelEnd, int candidatesStart, int candidatesEnd) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd,
                 candidatesStart, candidatesEnd);
+        editorSelectionStart = newSelStart;
+        editorSelectionEnd = newSelEnd;
         if (swipeTypingController != null) {
             swipeTypingController.onSelectionChanged(oldSelStart, oldSelEnd,
                     newSelStart, newSelEnd, candidatesEnd);
         }
         if (autoCorrectController != null) {
-            autoCorrectController.onSelectionChanged(oldSelStart, oldSelEnd,
-                    newSelStart, newSelEnd, candidatesEnd);
+            if (sEditorInfo != null && supportsAutoCorrectInputType(sEditorInfo.inputType)
+                    && (spellingSuggestionsEnabled || autoCorrectEnabled)) {
+                autoCorrectController.onSelectionChanged(oldSelStart, oldSelEnd,
+                        newSelStart, newSelEnd, candidatesEnd);
+            } else {
+                autoCorrectController.invalidateEditorPosition();
+            }
         }
         if (hangulComposer.hasComposition()
                 && (newSelStart != candidatesEnd || newSelEnd != candidatesEnd)) {
@@ -880,6 +919,26 @@ public class CodeBoardIME extends InputMethodService
                 && supportsAutoCorrectInputType(sEditorInfo.inputType);
     }
 
+    private void seedTypingAssistEditor() {
+        if (autoCorrectController == null) return;
+        boolean allowed = (spellingSuggestionsEnabled || autoCorrectEnabled)
+                && sEditorInfo != null && supportsAutoCorrectInputType(sEditorInfo.inputType);
+        autoCorrectController.onStartInput(allowed ? getCurrentInputConnection() : null,
+                allowed ? editorSelectionStart : -1, allowed ? editorSelectionEnd : -1);
+    }
+
+    private void refreshSuggestionHint() {
+        if (swipeSuggestions == null) return;
+        if (!spellingSuggestionsEnabled) {
+            swipeSuggestions.setHintText(getString(R.string.spelling_suggestions_disabled_hint));
+        } else if (sEditorInfo != null && !supportsAutoCorrectInputType(sEditorInfo.inputType)) {
+            swipeSuggestions.setHintText(getString(R.string.spelling_suggestions_unavailable_hint));
+        } else {
+            swipeSuggestions.setHintText(getString(swipeTypingEnabled
+                    ? R.string.swipe_and_type_suggestions_hint : R.string.type_suggestions_hint));
+        }
+    }
+
     static boolean supportsAutoCorrectInputType(int inputType) {
         if (!supportsSwipeInputType(inputType)
                 || (inputType & InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS) != 0) return false;
@@ -920,6 +979,7 @@ public class CodeBoardIME extends InputMethodService
         mCurrentKeyboardLayoutView.configureSwipe(enabled, this::onSwipeGesture);
         if (swipeSuggestions != null) swipeSuggestions.setVisibility(
                 enabled || (spellingSuggestionsEnabled && isTypingAssistAvailable()) ? View.VISIBLE : View.GONE);
+        refreshSuggestionHint();
     }
 
     private void onSwipeGesture(List<SwipeGesture.Point> path, List<SwipeGesture.KeyPosition> keys) {
@@ -928,7 +988,10 @@ public class CodeBoardIME extends InputMethodService
         if (!isSwipeAvailable() || swipeTypingController == null) return;
         InputConnection ic = getCurrentInputConnection();
         if (ic == null) return;
-        if (autoCorrectController != null) autoCorrectController.cancel();
+        if (autoCorrectController != null) {
+            autoCorrectController.cancel();
+            autoCorrectController.invalidateEditorPosition();
+        }
         finishKoreanComposition(ic);
         boolean capitalize = shift;
         boolean capsLock = shiftLock;

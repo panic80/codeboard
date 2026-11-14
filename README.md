@@ -26,6 +26,8 @@ Typed English and Korean words receive spelling suggestions. Pressing Space appl
 
 The **Add word** button beside the suggestions saves the word you are typing directly to your personal dictionary. The button shows the exact spelling it will save and changes to **Saved** afterward. If a word was just autocorrected, **Add word** restores and teaches your original spelling. Spelling suggestions have their own **Features > Spelling suggestions** switch, so you can use suggestions and teach words while automatic correction is off.
 
+Typing assistance also supports editors that do not provide extracted text, using verified keyboard edits, surrounding text, and reported cursor positions. Unknown or ambiguous cursor locations fail closed. Passwords and fields requesting no suggestions remain excluded. The empty suggestion bar explains when spelling suggestions are switched off or unavailable in the current field.
+
 Use **Features > Personal dictionary > Add word** to save an English or Korean word. Personal words are stored on the device, keep their saved spelling, and are shared by autocorrect and swipe typing. Tap a saved word in that screen to remove it. Dictionary changes take effect without restarting the app and survive app updates.
 
 **<p align="center">If you are using Codeboard and would like to thank me:</p>**
