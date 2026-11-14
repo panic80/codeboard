@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="inline_learning_action" type="id" />
+    <item name="inline_learning_label" type="id" />
+    <item name="inline_learning_word" type="id" />
+    <string name="inline_learning_add_word">Add word</string>
+    <string name="inline_learning_add_description">Add %1$s to personal dictionary</string>
+    <string name="inline_learning_saved">Saved</string>
+    <string name="inline_learning_saved_description">Added %1$s to personal dictionary</string>
+    <string name="inline_learning_error">Not saved</string>
+    <string name="inline_learning_error_description">Could not add %1$s to personal dictionary</string>
+    <string name="inline_learning_typed_word_description">Typed word: %1$s</string>
+</resources>

@@ -39,6 +39,10 @@ public class KeyboardPreferences {
         return read("auto_correction", res.getBoolean(R.bool.auto_correction));
     }
 
+    public boolean isSpellingSuggestionsEnabled() {
+        return read("spelling_suggestions", res.getBoolean(R.bool.spelling_suggestions));
+    }
+
     public void setSoundEnabled(boolean bool) {
         write("sound", bool);
     }

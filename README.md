@@ -24,6 +24,8 @@ Recognition runs on the device using bundled word lists. Swipe words are separat
 
 Typed English and Korean words receive spelling suggestions. Pressing Space applies a correction when the match is confident; ambiguous words remain as typed. Tap an alternative to choose a spelling. Backspace immediately after an automatic correction restores the original spelling and keeps the typed space. Autocorrect can be switched off in **Features > Autocorrect** and is unavailable in passwords, email/URL fields, or fields that request no suggestions. Mixed-case identifiers and tokens with numbers or code symbols are preserved.
 
+The **Add word** button beside the suggestions saves the word you are typing directly to your personal dictionary. The button shows the exact spelling it will save and changes to **Saved** afterward. If a word was just autocorrected, **Add word** restores and teaches your original spelling. Spelling suggestions have their own **Features > Spelling suggestions** switch, so you can use suggestions and teach words while automatic correction is off.
+
 Use **Features > Personal dictionary > Add word** to save an English or Korean word. Personal words are stored on the device, keep their saved spelling, and are shared by autocorrect and swipe typing. Tap a saved word in that screen to remove it. Dictionary changes take effect without restarting the app and survive app updates.
 
 **<p align="center">If you are using Codeboard and would like to thank me:</p>**

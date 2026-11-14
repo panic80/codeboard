@@ -9,7 +9,6 @@ import android.text.Selection;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -167,6 +166,7 @@ public class CodeBoardIMESwipeTest {
             Context app = RuntimeEnvironment.getApplication();
             PreferenceManager.getDefaultSharedPreferences(app).edit().clear()
                     .putBoolean("swipe_typing", true).putBoolean("auto_correction", false)
+                    .putBoolean("spelling_suggestions", false)
                     .putBoolean("vibrate", false)
                     .putBoolean("sound", false).putBoolean("notification", false)
                     .putBoolean("navbar", false).putString("layout", korean ?
@@ -273,10 +273,9 @@ public class CodeBoardIMESwipeTest {
             return start < 0 || end < start ? "" : text.subSequence(start, end).toString();
         }
 
-        ViewGroup candidates() { return (ViewGroup) strip.getChildAt(0); }
-        int candidateCount() { return hasCandidates() ? candidates().getChildCount() : 0; }
-        TextView candidate(int index) { return (TextView) candidates().getChildAt(index); }
-        boolean hasCandidates() { return candidates().getChildCount() > 0 && candidate(0).isClickable(); }
+        int candidateCount() { return hasCandidates() ? strip.getCandidateCount() : 0; }
+        TextView candidate(int index) { return strip.getCandidateView(index); }
+        boolean hasCandidates() { return strip.getCandidateCount() > 0 && candidate(0).isClickable(); }
     }
 
     /** Uses Android's editable composition behavior and models basic editor key events. */

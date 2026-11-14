@@ -11,7 +11,6 @@ import android.view.inputmethod.ExtractedText;
 import android.view.inputmethod.ExtractedTextRequest;
 import android.view.inputmethod.InputConnection;
 import android.widget.EditText;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.gazlaws.codeboard.gesture.SwipeDecoder.Entry;
@@ -318,7 +317,7 @@ public class SwipeTypingControllerTest {
     }
 
     private TextView candidateAt(int index) {
-        return (TextView) ((LinearLayout) strip.getChildAt(0)).getChildAt(index);
+        return strip.getCandidateView(index);
     }
 
     private void setText(String text) {

@@ -91,6 +91,7 @@ public class CodeBoardIME extends InputMethodService
     private boolean koreanMode = true;
     private boolean swipeTypingEnabled = true;
     private boolean autoCorrectEnabled = true;
+    private boolean spellingSuggestionsEnabled = true;
     private SwipeTypingController swipeTypingController;
     private AutoCorrectController autoCorrectController;
     private SuggestionStripView swipeSuggestions;
@@ -105,14 +106,14 @@ public class CodeBoardIME extends InputMethodService
             hangulComposer.reset();
             return;
         }
-        boolean autoAvailable = isAutoCorrectAvailable();
+        boolean typingAssistAvailable = isTypingAssistAvailable();
         char koreanKey = KoreanKeyMap.qwertyKeyFor(primaryCode);
         boolean koreanLetter = koreanKey != 0 && koreanLayoutSelected && koreanMode
                 && mKeyboardState == R.integer.keyboard_normal
                 && !ctrl;
         if (koreanKey != 0) primaryCode = koreanKey;
         if (autoCorrectController != null && primaryCode != 16 && primaryCode != 32
-                && primaryCode != -5 && (!autoAvailable || primaryCode < 32 || primaryCode > 126)) {
+                && primaryCode != -5 && (!typingAssistAvailable || primaryCode < 32 || primaryCode > 126)) {
             autoCorrectController.cancel();
         }
         if (swipeTypingController != null && primaryCode != 16 && primaryCode != -5) {
@@ -252,7 +253,7 @@ public class CodeBoardIME extends InputMethodService
                 }
                 if (koreanLetter) {
                     updateKoreanComposition(ic, hangulComposer.input(KoreanKeyMap.toJamo(code)));
-                    if (autoAvailable && autoCorrectController != null) {
+                    if (typingAssistAvailable && autoCorrectController != null) {
                         autoCorrectController.onTypedTextUpdated(true);
                     }
                     break;
@@ -260,13 +261,13 @@ public class CodeBoardIME extends InputMethodService
                 if (primaryCode == -5 && (meta & KeyEvent.META_CTRL_ON) == 0
                         && hangulComposer.hasComposition()) {
                     updateKoreanComposition(ic, hangulComposer.backspace());
-                    if (autoAvailable && autoCorrectController != null) {
+                    if (typingAssistAvailable && autoCorrectController != null) {
                         autoCorrectController.onBackspaceTyped(true);
                     }
                     break;
                 }
                 finishKoreanComposition(ic);
-                if (autoAvailable && (meta & KeyEvent.META_CTRL_ON) == 0) {
+                if (typingAssistAvailable && (meta & KeyEvent.META_CTRL_ON) == 0) {
                     if (primaryCode == -5) {
                         deleteTypedCharacter(ic);
                         autoCorrectController.onBackspaceTyped(koreanLayoutSelected && koreanMode);
@@ -494,7 +495,7 @@ public class CodeBoardIME extends InputMethodService
             if (ic != null) {
                 if (swipeTypingController != null) swipeTypingController.finish(ic, false);
                 finishKoreanComposition(ic);
-                if (!isAutoCorrectAvailable() || autoCorrectController == null
+                if (!isTypingAssistAvailable() || autoCorrectController == null
                         || !autoCorrectController.commitSpace()) {
                     ic.commitText(String.valueOf((char) primaryCode), 1);
                 }
@@ -606,6 +607,7 @@ public class CodeBoardIME extends InputMethodService
         soundOn = sharedPreferences.isSoundEnabled();
         swipeTypingEnabled = sharedPreferences.isSwipeTypingEnabled();
         autoCorrectEnabled = sharedPreferences.isAutoCorrectEnabled();
+        spellingSuggestionsEnabled = sharedPreferences.isSpellingSuggestionsEnabled();
         mKeyboardUiFactory.theme.enablePreview = sharedPreferences.isPreviewEnabled();
         mKeyboardUiFactory.theme.enableBorder = sharedPreferences.isBorderEnabled();
         mKeyboardUiFactory.theme.fontSize = sharedPreferences.getFontSizeAsSp();
@@ -728,7 +730,7 @@ public class CodeBoardIME extends InputMethodService
 
             Collection<Key> keyboardLayout = builder.build();
             mCurrentKeyboardLayoutView = mKeyboardUiFactory.createKeyboardView(this, keyboardLayout);
-            if (swipeTypingEnabled || autoCorrectEnabled) {
+            if (swipeTypingEnabled || spellingSuggestionsEnabled || autoCorrectEnabled) {
                 if (swipeTypingController == null) {
                     swipeTypingController = new SwipeTypingController(this,
                             new SwipeTypingController.ConnectionProvider() {
@@ -740,7 +742,7 @@ public class CodeBoardIME extends InputMethodService
                 }
                 swipeSuggestions = new SuggestionStripView(this, mKeyboardUiFactory.theme);
                 swipeTypingController.setSuggestionStrip(swipeSuggestions);
-                if (autoCorrectEnabled) {
+                if (spellingSuggestionsEnabled || autoCorrectEnabled) {
                     if (autoCorrectController == null) {
                         autoCorrectController = new AutoCorrectController(this,
                                 new AutoCorrectController.ConnectionProvider() {
@@ -749,12 +751,13 @@ public class CodeBoardIME extends InputMethodService
                                     }
                                 }, () -> finishKoreanComposition(getCurrentInputConnection()));
                     }
-                    autoCorrectController.setSuggestionStrip(swipeSuggestions);
+                    autoCorrectController.setAutoCorrectionEnabled(autoCorrectEnabled);
+                    autoCorrectController.setSuggestionStrip(spellingSuggestionsEnabled ? swipeSuggestions : null);
                 } else if (autoCorrectController != null) {
                     autoCorrectController.cancel();
                     autoCorrectController.setSuggestionStrip(null);
                 }
-                swipeSuggestions.setHintText(autoCorrectEnabled
+                swipeSuggestions.setHintText(spellingSuggestionsEnabled
                         ? (swipeTypingEnabled ? "Swipe or type for suggestions" : "Type for suggestions")
                         : "Swipe across letters to type");
             } else {
@@ -871,8 +874,8 @@ public class CodeBoardIME extends InputMethodService
         if (swipeTypingController != null) swipeTypingController.cancel(getCurrentInputConnection());
     }
 
-    private boolean isAutoCorrectAvailable() {
-        return autoCorrectEnabled && autoCorrectController != null && !ctrl
+    private boolean isTypingAssistAvailable() {
+        return (spellingSuggestionsEnabled || autoCorrectEnabled) && autoCorrectController != null && !ctrl
                 && mKeyboardState == R.integer.keyboard_normal && sEditorInfo != null
                 && supportsAutoCorrectInputType(sEditorInfo.inputType);
     }
@@ -916,7 +919,7 @@ public class CodeBoardIME extends InputMethodService
         boolean enabled = isSwipeAvailable();
         mCurrentKeyboardLayoutView.configureSwipe(enabled, this::onSwipeGesture);
         if (swipeSuggestions != null) swipeSuggestions.setVisibility(
-                enabled || isAutoCorrectAvailable() ? View.VISIBLE : View.GONE);
+                enabled || (spellingSuggestionsEnabled && isTypingAssistAvailable()) ? View.VISIBLE : View.GONE);
     }
 
     private void onSwipeGesture(List<SwipeGesture.Point> path, List<SwipeGesture.KeyPosition> keys) {

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="auto_correction_title">Autocorrect</string>
-    <string name="auto_correction_summary">Correct typed English and Korean words on Space. Backspace undoes a correction.</string>
+    <string name="auto_correction_summary">Automatically replace likely typos on Space. Backspace undoes the correction.</string>
+    <string name="spelling_suggestions_title">Spelling suggestions</string>
+    <string name="spelling_suggestions_summary">Show spelling alternatives and Add word while typing</string>
 </resources>

@@ -11,9 +11,9 @@ import android.view.inputmethod.ExtractedText;
 import android.view.inputmethod.ExtractedTextRequest;
 import android.view.inputmethod.InputConnection;
 import android.widget.EditText;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import com.gazlaws.codeboard.R;
 import com.gazlaws.codeboard.layout.ui.SuggestionStripView;
 import com.gazlaws.codeboard.theme.ThemeInfo;
 
@@ -45,6 +45,8 @@ public class AutoCorrectControllerTest {
     private Provider provider;
     private ManualExecutor worker;
     private Loader loader;
+    private PersonalDictionary personal;
+    private TestPersonalWords personalWords;
     private SuggestionStripView strip;
     private AutoCorrectController controller;
     private int edits;
@@ -56,11 +58,15 @@ public class AutoCorrectControllerTest {
         provider = new Provider(connection);
         worker = new ManualExecutor();
         loader = new Loader();
+        context.getSharedPreferences("personal_dictionary", Context.MODE_PRIVATE).edit().clear().commit();
+        personal = new PersonalDictionary(context);
+        personalWords = new TestPersonalWords(personal);
+        loader.personal = personal;
         strip = new SuggestionStripView(context, new ThemeInfo());
         controller = new AutoCorrectController(provider, () -> {
             edits++;
             if (provider.current != null) provider.current.finishComposingText();
-        }, worker, null, loader, new Handler(Looper.getMainLooper()));
+        }, worker, null, loader, new Handler(Looper.getMainLooper()), personalWords);
         controller.setSuggestionStrip(strip);
     }
 
@@ -347,6 +353,222 @@ public class AutoCorrectControllerTest {
         assertEquals("tehx", text());
     }
 
+    @Test public void addIsImmediateAndProtectsTheCurrentWordAtSpace() {
+        type("teh");
+        assertEquals("teh", candidate(0));
+        assertLearning("Add word", true);
+        assertTrue("The engine has not loaded yet", loader.loads == 0);
+        learn();
+        assertEquals("teh", text());
+        assertEquals(1, edits);
+        assertEquals(Arrays.asList("teh"), personal.getWords());
+        assertLearning("Saved", false);
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("teh ", text());
+        assertFalse(controller.undoCorrection());
+        assertLearning("Saved", false);
+    }
+
+    @Test public void addingAfterCorrectionRestoresOriginalAndPersistsIt() {
+        type("teh");
+        nonletter('.');
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("the. ", text());
+        assertLearning("Add word", true);
+        learn();
+        assertEquals("teh. ", text());
+        assertEquals(Arrays.asList("teh"), new PersonalDictionary(context).getWords());
+        assertLearning("Saved", false);
+        assertFalse(controller.undoCorrection());
+
+        type("teh");
+        assertLearning("Saved", false);
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("teh. teh ", text());
+    }
+
+    @Test public void learningWhileSpaceIsPendingCancelsItsCorrectionAndReplaysInput() {
+        type("teh");
+        assertTrue(controller.commitSpace());
+        assertLearning("Add word", true);
+        assertTrue(controller.deferIfBusy(() -> type("x")));
+        learn();
+        assertEquals("teh x", text());
+        assertEquals(Arrays.asList("teh"), personal.getWords());
+        drain();
+        assertEquals("teh x", text());
+    }
+
+    @Test public void typingDoesNotLearnAutomaticallyAndKnownWordsMayBeAdded() {
+        type("the");
+        drain();
+        assertEquals(1, strip.getCandidateCount());
+        assertLearning("Add word", true);
+        assertTrue(personal.getWords().isEmpty());
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("the ", text());
+        assertTrue(personal.getWords().isEmpty());
+        learn();
+        assertEquals(Arrays.asList("the"), personal.getWords());
+    }
+
+    @Test public void savedWordsAreCaseInsensitiveAndAreNotAddedTwice() {
+        assertTrue(personal.addWord("Teh"));
+        type("teh");
+        assertLearning("Saved", false);
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("teh ", text());
+        assertEquals(Arrays.asList("Teh"), personal.getWords());
+        assertLearning("Saved", false);
+    }
+
+    @Test public void staleLearningCallbacksCannotSaveChangedWordsOrEditors() {
+        type("te");
+        View.OnClickListener previous = learningListener();
+        type("h");
+        previous.onClick(learningAction());
+        assertTrue(personal.getWords().isEmpty());
+
+        View.OnClickListener changedEditor = learningListener();
+        EditText second = new EditText(context);
+        provider.current = new TestConnection(second);
+        changedEditor.onClick(learningAction());
+        assertTrue(personal.getWords().isEmpty());
+
+        provider.current = connection;
+        View.OnClickListener movedCursor = learningListener();
+        Selection.setSelection(editor.getText(), 1);
+        movedCursor.onClick(learningAction());
+        assertTrue(personal.getWords().isEmpty());
+        controller.cancel();
+        Selection.setSelection(editor.getText(), editor.length());
+        movedCursor.onClick(learningAction());
+        assertTrue(personal.getWords().isEmpty());
+        assertEquals(View.GONE, learningAction().getVisibility());
+    }
+
+    @Test public void koreanMustBeComposedAndLearningFinishesTheSyllable() {
+        compose("ㅇ");
+        assertEquals(View.GONE, learningAction().getVisibility());
+        compose("아");
+        assertLearning("Add word", true);
+        compose("안");
+        learn();
+        assertEquals("안", text());
+        assertEquals(1, edits);
+        assertEquals(Arrays.asList("안"), personal.getWords());
+        assertLearning("Saved", false);
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("안 ", text());
+
+        compose("ㄱ");
+        assertEquals(View.GONE, learningAction().getVisibility());
+        compose("가");
+        commitComposedAndStart("ㄴ");
+        assertEquals(View.GONE, learningAction().getVisibility());
+    }
+
+    @Test public void learningRespectsPersonalDictionaryLengthAndCompletedContractions() {
+        type("a");
+        assertEquals(View.GONE, learningAction().getVisibility());
+        type("b");
+        assertLearning("Add word", true);
+        nonletter('\'');
+        assertEquals(View.GONE, learningAction().getVisibility());
+        type("c");
+        assertLearning("Add word", true);
+        controller.cancel();
+        setText("");
+        for (int i = 0; i < 48; i++) type("a");
+        assertLearning("Add word", true);
+        type("a");
+        assertEquals(View.GONE, learningAction().getVisibility());
+
+        controller.cancel();
+        setText("");
+        for (int i = 0; i < 21; i++) {
+            connection.commitText("각", 1);
+            controller.onTypedTextUpdated(true);
+        }
+        assertLearning("Add word", true);
+        connection.commitText("각", 1);
+        controller.onTypedTextUpdated(true);
+        assertEquals(View.GONE, learningAction().getVisibility());
+    }
+
+    @Test public void dictionaryLoadFailureStillOffersAddAndSaveFailureIsNotReportedAsSaved() {
+        loader.fail = true;
+        type("teh");
+        drain();
+        assertLearning("Add word", true);
+        personalWords.fail = true;
+        learn();
+        assertLearning("Not saved", false);
+        assertTrue(personal.getWords().isEmpty());
+        type("s");
+        assertLearning("Add word", true);
+        personalWords.fail = false;
+        learn();
+        assertLearning("Saved", false);
+        assertEquals(Arrays.asList("tehs"), personal.getWords());
+    }
+
+    @Test public void disablingAutomaticCorrectionKeepsSuggestionsAndLearning() {
+        controller.setAutoCorrectionEnabled(false);
+        type("teh");
+        assertLearning("Add word", true);
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("teh ", text());
+        assertEquals("teh", candidate(0));
+        assertEquals("the", candidate(1));
+        assertLearning("Add word", true);
+        assertTrue(personal.getWords().isEmpty());
+        click(1);
+        assertEquals("the ", text());
+    }
+
+    @Test public void manualSuggestionsDoNotBlockTypingWhileSpaceSearchIsPending() {
+        controller.setAutoCorrectionEnabled(false);
+        type("teh");
+        assertTrue(controller.commitSpace());
+        View.OnClickListener oldAction = learningListener();
+        assertFalse(controller.deferIfBusy(null));
+        type("helo");
+        assertEquals("teh helo", text());
+        assertLearning("Add word", true);
+        oldAction.onClick(learningAction());
+        assertTrue(personal.getWords().isEmpty());
+        drain();
+        assertEquals("teh helo", text());
+        assertEquals("helo", candidate(0));
+        assertEquals("hello", candidate(1));
+        assertLearning("Add word", true);
+        TextView target = strip.findViewById(R.id.inline_learning_word);
+        assertEquals("helo", target.getText().toString());
+    }
+
+    @Test public void teachingAtNonblockingBoundaryInvalidatesItsPendingResult() {
+        controller.setAutoCorrectionEnabled(false);
+        type("teh");
+        assertTrue(controller.commitSpace());
+        assertFalse(controller.deferIfBusy(null));
+        learn();
+        assertEquals("teh ", text());
+        assertEquals(Arrays.asList("teh"), personal.getWords());
+        drain();
+        assertEquals("teh ", text());
+        assertEquals(1, strip.getCandidateCount());
+        assertEquals("teh", candidate(0));
+        assertLearning("Saved", false);
+    }
+
     private void type(String letters) {
         for (char c : letters.toCharArray()) {
             connection.commitText(String.valueOf(c), 1);
@@ -375,9 +597,26 @@ public class AutoCorrectControllerTest {
     }
 
     private String text() { return editor.getText().toString(); }
-    private TextView candidateView(int index) { return (TextView) ((LinearLayout) strip.getChildAt(0)).getChildAt(index); }
+    private TextView candidateView(int index) { return strip.getCandidateView(index); }
     private String candidate(int index) { return candidateView(index).getText().toString(); }
     private void click(int index) { candidateView(index).performClick(); }
+
+    private View learningAction() { return strip.findViewById(R.id.inline_learning_action); }
+    private void assertLearning(String label, boolean clickable) {
+        assertEquals(View.VISIBLE, learningAction().getVisibility());
+        TextView text = strip.findViewById(R.id.inline_learning_label);
+        assertEquals(label, text.getText().toString());
+        assertEquals(clickable, learningAction().isClickable());
+    }
+    private void learn() {
+        assertLearning("Add word", true);
+        assertTrue(learningAction().performClick());
+    }
+    private View.OnClickListener learningListener() {
+        View.OnClickListener listener = shadowOf(learningAction()).getOnClickListener();
+        assertNotNull(listener);
+        return listener;
+    }
 
     private void drain() {
         int count = 0;
@@ -393,8 +632,7 @@ public class AutoCorrectControllerTest {
         long deadline = System.nanoTime() + 10_000_000_000L;
         while (System.nanoTime() < deadline) {
             shadowOf(Looper.getMainLooper()).idle();
-            LinearLayout content = (LinearLayout) strip.getChildAt(0);
-            if (content.getChildCount() > index && expected.equals(candidate(index))) return;
+            if (strip.getCandidateCount() > index && expected.equals(candidate(index))) return;
             Thread.sleep(10);
         }
         fail("Timed out waiting for candidate " + expected);
@@ -442,14 +680,33 @@ public class AutoCorrectControllerTest {
                 new SwipeDecoder.Entry("안녕하세요", 100000)));
         int version, loads;
         boolean fail, failVersion;
+        PersonalDictionary personal;
         @Override public int version() {
             if (failVersion) throw new IllegalStateException("Version unavailable");
-            return version;
+            return version + (personal == null ? 0 : personal.getVersion());
         }
         @Override public List<SwipeDecoder.Entry> load(boolean korean) throws IOException {
             loads++;
             if (fail) throw new IOException("Dictionary missing");
-            return new ArrayList<>(entries);
+            ArrayList<SwipeDecoder.Entry> all = new ArrayList<>(entries);
+            if (personal != null) all.addAll(personal.getEntries(korean));
+            return all;
+        }
+    }
+
+    private static final class TestPersonalWords implements AutoCorrectController.PersonalWordStore {
+        final PersonalDictionary personal;
+        boolean fail;
+        TestPersonalWords(PersonalDictionary personal) { this.personal = personal; }
+        @Override public boolean contains(String word) {
+            for (String saved : personal.getWords()) {
+                if (saved.replace('’', '\'').equalsIgnoreCase(word.replace('’', '\''))) return true;
+            }
+            return false;
+        }
+        @Override public boolean add(String word) {
+            if (fail) throw new IllegalStateException("Simulated saving failure");
+            return personal.addWord(word);
         }
     }
 }

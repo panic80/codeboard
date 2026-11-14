@@ -8,7 +8,6 @@ import android.text.Selection;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.ExtractedText;
@@ -243,6 +242,7 @@ public class CodeBoardIMEAutoCorrectTest {
             context.getSharedPreferences("personal_dictionary", Context.MODE_PRIVATE).edit().clear().commit();
             PreferenceManager.getDefaultSharedPreferences(context).edit().clear()
                     .putBoolean("swipe_typing", true).putBoolean("auto_correction", autoCorrect)
+                    .putBoolean("spelling_suggestions", autoCorrect)
                     .putBoolean("vibrate", false).putBoolean("sound", false)
                     .putBoolean("notification", false).putBoolean("navbar", false)
                     .putString("layout", korean ? String.valueOf(Definitions.LAYOUT_KOREAN) : "0")
@@ -371,21 +371,18 @@ public class CodeBoardIMEAutoCorrectTest {
             int end = BaseInputConnection.getComposingSpanEnd(text);
             return start < 0 || end < start ? "" : text.subSequence(start, end).toString();
         }
-        private ViewGroup candidateContainer() { return (ViewGroup) strip.getChildAt(0); }
         boolean hasCandidate(String text) { return candidate(text) != null; }
         TextView candidate(String text) {
-            ViewGroup choices = candidateContainer();
-            for (int i = 0; i < choices.getChildCount(); i++) {
-                TextView item = (TextView) choices.getChildAt(i);
+            for (int i = 0; i < strip.getCandidateCount(); i++) {
+                TextView item = strip.getCandidateView(i);
                 if (item.isClickable() && item.getText().toString().equals(text)) return item;
             }
             return null;
         }
         List<String> candidateTexts() {
             ArrayList<String> result = new ArrayList<>();
-            ViewGroup choices = candidateContainer();
-            for (int i = 0; i < choices.getChildCount(); i++) {
-                result.add(((TextView) choices.getChildAt(i)).getText().toString());
+            for (int i = 0; i < strip.getCandidateCount(); i++) {
+                result.add(strip.getCandidateView(i).getText().toString());
             }
             return result;
         }

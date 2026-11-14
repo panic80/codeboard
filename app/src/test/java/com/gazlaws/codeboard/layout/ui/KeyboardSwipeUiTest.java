@@ -164,22 +164,20 @@ public class KeyboardSwipeUiTest {
         container.layout(0, 0, container.getMeasuredWidth(), container.getMeasuredHeight());
         assertTrue(strip.getHeight() > 0);
         assertEquals(strip.getBottom(), fixture.layout.getTop());
-        TextView hint = (TextView) ((ViewGroup) strip.getChildAt(0)).getChildAt(0);
+        TextView hint = strip.getCandidateView(0);
         assertEquals("Swipe across letters to type", hint.getText().toString());
 
         ArrayList<String> selections = new ArrayList<>();
         strip.setCandidates(Arrays.asList("hello", "안녕하세요"), selections::add);
-        ViewGroup choices = (ViewGroup) strip.getChildAt(0);
-        assertEquals(2, choices.getChildCount());
+        assertEquals(2, strip.getCandidateCount());
         container.measure(width, height);
         container.layout(0, 0, container.getMeasuredWidth(), container.getMeasuredHeight());
-        assertEquals(strip.getHeight(), choices.getHeight());
-        assertEquals(strip.getHeight(), choices.getChildAt(0).getHeight());
-        assertTrue(choices.getChildAt(0).getWidth() > 0);
-        assertTrue(choices.getChildAt(1).performClick());
+        assertEquals(strip.getHeight(), strip.getCandidateView(0).getHeight());
+        assertTrue(strip.getCandidateView(0).getWidth() > 0);
+        assertTrue(strip.getCandidateView(1).performClick());
         assertEquals(Collections.singletonList("안녕하세요"), selections);
         strip.setCandidates(Collections.emptyList(), selections::add);
-        assertFalse(((ViewGroup) strip.getChildAt(0)).getChildAt(0).isClickable());
+        assertFalse(strip.getCandidateView(0).isClickable());
     }
 
     private static void send(View target, int action, long time, float x, float y) {
