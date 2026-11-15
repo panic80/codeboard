@@ -23,6 +23,12 @@ public final class SwipeDecoder {
     private static final int MAX_RESULT_COUNT = 32;
     private static final int MAX_SEQUENCE_LENGTH = 64;
     private static final float ENDPOINT_RADIUS = 1.7f;
+    private static final float CONTEXT_GAP_SCALE = 2f;
+    private static final float CONTEXT_FIT_NOISE_FLOOR = 0.001f;
+    private static final float CONTEXT_FIT_GAP_SCALE = 0.18f;
+    private static final int CONTEXT_ENDPOINT_SAMPLES = 4;
+    private static final float CONTEXT_INTERIOR_TOLERANCE = 0.45f;
+    private static final float CONTEXT_INTERIOR_GAP_SCALE = 40f;
 
     /** Maximum amount that context can subtract from a candidate's gesture cost. */
     public static final float MAX_CONTEXT_BONUS = 0.55f;
@@ -262,10 +268,33 @@ public final class SwipeDecoder {
         Collections.sort(ranked, BEST_FIRST);
         if (contextPrior != null && !ranked.isEmpty()
                 && !contextPrior.isProtected(ranked.get(0).word.text)) {
+            ScoredWord geometryWinner = ranked.get(0);
+            float winnerFit = geometryError(geometryWinner, repeatedKeys);
+            float winnerInteriorMismatch = interiorMismatch(geometryWinner.word.template, observed);
             for (int i = 0; i < ranked.size(); i++) {
                 ScoredWord original = ranked.get(i);
                 float bonus = contextBonus(contextPrior, original.word.text);
-                if (bonus > 0) ranked.set(i, new ScoredWord(original.word, original.score - bonus));
+                if (bonus > 0) {
+                    // Context is most useful between geometrically plausible alternatives. As a
+                    // rival falls behind, reduce its bonus, especially when the winning path is
+                    // nearly exact and the rival has a distinctly worse fit. The small noise
+                    // floor allows context to resolve candidates with equivalent gesture shapes.
+                    float scoreGap = Math.max(0f, original.score - geometryWinner.score);
+                    float fitGap = Math.max(0f, geometryError(original, repeatedKeys) - winnerFit);
+                    float matchStrength = winnerFit + CONTEXT_FIT_NOISE_FLOOR;
+                    bonus /= 1f + CONTEXT_GAP_SCALE * scoreGap;
+                    bonus *= matchStrength / (matchStrength + CONTEXT_FIT_GAP_SCALE * fitGap);
+                    // DTW averages can hide a missing interior turn. Compare each path to the
+                    // other in both directions, allowing ordinary finger noise and the winner's
+                    // own mismatch. Ignore the ends so context can still resolve nearby starts
+                    // and releases, and keep indistinguishable paths available for context.
+                    float mismatch = original == geometryWinner ? winnerInteriorMismatch
+                            : interiorMismatch(original.word.template, observed);
+                    float excess = Math.max(0f, mismatch
+                            - Math.max(CONTEXT_INTERIOR_TOLERANCE, winnerInteriorMismatch));
+                    bonus /= 1f + CONTEXT_INTERIOR_GAP_SCALE * excess;
+                    ranked.set(i, new ScoredWord(original.word, original.score - bonus));
+                }
             }
             Collections.sort(ranked, BEST_FIRST);
         }
@@ -344,6 +373,14 @@ public final class SwipeDecoder {
         return bonus > 0 ? (float) Math.min(bonus, MAX_CONTEXT_BONUS) : 0;
     }
 
+    private static float geometryError(ScoredWord candidate, int repeatedKeys) {
+        // Frequency and repeat pauses still affect ranking, but neither describes how well the
+        // actual path fits the template. Excluding them keeps context useful for words whose
+        // trajectories are identical, including invisible double letters and shifted Korean keys.
+        return Math.max(0f, candidate.score - candidate.word.frequencyPenalty
+                - repeatPenalty(repeatedKeys, candidate.word.repeatMask));
+    }
+
     private static final Comparator<ScoredWord> BEST_FIRST = (a, b) -> {
         int comparison = Float.compare(a.score, b.score);
         if (comparison != 0) return comparison;
@@ -387,6 +424,31 @@ public final class SwipeDecoder {
             current = swap;
         }
         return previous[SAMPLE_COUNT] / SAMPLE_COUNT;
+    }
+
+    private static float interiorMismatch(float[] first, float[] second) {
+        return Math.max(maxInteriorDistance(first, second), maxInteriorDistance(second, first));
+    }
+
+    /** Largest distance from an interior sample to the other continuous polyline, in key units. */
+    private static float maxInteriorDistance(float[] samples, float[] polyline) {
+        float worstSquared = 0f;
+        for (int j = CONTEXT_ENDPOINT_SAMPLES; j < SAMPLE_COUNT - CONTEXT_ENDPOINT_SAMPLES; j++) {
+            float px = samples[2 * j], py = samples[2 * j + 1];
+            float bestSquared = Float.POSITIVE_INFINITY;
+            for (int i = 0; i < SAMPLE_COUNT - 1; i++) {
+                float ax = polyline[2 * i], ay = polyline[2 * i + 1];
+                float dx = polyline[2 * i + 2] - ax, dy = polyline[2 * i + 3] - ay;
+                float lengthSquared = dx * dx + dy * dy;
+                float fraction = lengthSquared == 0 ? 0
+                        : ((px - ax) * dx + (py - ay) * dy) / lengthSquared;
+                fraction = Math.max(0f, Math.min(1f, fraction));
+                bestSquared = Math.min(bestSquared,
+                        distanceSquared(px, py, ax + fraction * dx, ay + fraction * dy));
+            }
+            worstSquared = Math.max(worstSquared, bestSquared);
+        }
+        return (float) Math.sqrt(worstSquared);
     }
 
     private static float lengthPenalty(float actual, float expected) {

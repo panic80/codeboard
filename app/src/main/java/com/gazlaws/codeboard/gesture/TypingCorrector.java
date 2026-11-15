@@ -544,6 +544,9 @@ public final class TypingCorrector {
         if (korean) return suggestion;
         Match best = matches.get(0);
         int length = letterCount(normalized);
+        // Context may surface two-edit alternatives for short text, but those guesses are too
+        // broad to commit automatically. They remain available in the suggestion strip.
+        if (length <= 4 && best.edits > 1) return null;
         int frequencyFloor = Math.min(30000, Math.max(100, maxFrequency / 1000));
         // Short unknown words often are initials, text shorthand, or a name. Requiring a
         // frequent and plausible single keystroke error avoids forcing "omw" to "mow"

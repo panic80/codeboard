@@ -71,6 +71,92 @@ public class SwipeDecoderTest {
         assertEquals(bounded, unboundedInput);
     }
 
+    @Test public void contextCannotReplaceAWellMatchedNoisyEndpoint() {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries("this", 5739788, "third", 55750));
+        // Each point remains inside the intended key, with offsets of up to 0.35 key widths.
+        List<Point> first = Arrays.asList(
+                new Point(3.682939f, 0.267147f), new Point(5.327132f, 1.310178f),
+                new Point(6.874869f, -0.196451f), new Point(1.823769f, 0.891663f));
+        List<Point> second = Arrays.asList(
+                new Point(4.106874f, -0.022892f), new Point(5.844778f, 1.331063f),
+                new Point(6.830290f, 0.135389f), new Point(1.816829f, 0.842090f));
+        SwipeDecoder.ContextPrior afterThe = word -> word.equals("third") ? contextBonus(1226) : 0;
+
+        for (List<Point> path : Arrays.asList(first, second)) {
+            assertEquals("this", decoder.decode(path, 2).get(0));
+            assertEquals("this", decoder.decode(path, 2, afterThe).get(0));
+        }
+        assertEquals("this", decoder.decode(pathFor(keys, "this"), 2, afterThe).get(0));
+        assertEquals("third", decoder.decode(pathFor(keys, "third"), 2, afterThe).get(0));
+    }
+
+    @Test public void contextCannotReplaceDifferentClearGestureShapes() {
+        List<KeyPosition> keys = qwerty();
+        assertContextKeepsClearShapes(keys, "shirt", 30183, "short", 63714, 254);
+        assertContextKeepsClearShapes(keys, "sock", 4440, "stock", 16373, 123);
+        assertContextKeepsClearShapes(keys, "live", 281046, "love", 830324, 561);
+
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries("there", 3148528, "the", 22761659));
+        List<Point> noisyThere = Arrays.asList(
+                new Point(3.710616f, 0.054979f), new Point(5.263451f, 0.741510f),
+                new Point(1.898026f, 0.231955f), new Point(3.154772f, 0.120053f),
+                new Point(1.807703f, 0.021643f));
+        SwipeDecoder.ContextPrior afterThat = word -> word.equals("there") ? contextBonus(2306)
+                : word.equals("the") ? contextBonus(18682) : 0;
+        assertEquals("there", decoder.decode(noisyThere, 2).get(0));
+        assertEquals("there", decoder.decode(noisyThere, 2, afterThat).get(0));
+    }
+
+    @Test public void contextRespectsNoisyIntermediateTurns() {
+        List<KeyPosition> keys = qwerty();
+        List<Point> noisyShirt = Arrays.asList(
+                new Point(1.4800f, 1.0710f), new Point(5.4098f, 0.9331f),
+                new Point(7.0239f, 0.0960f), new Point(3.1381f, 0.1067f),
+                new Point(3.9173f, 0.1339f));
+        assertContextKeepsNoisyShape(keys, "shirt", 30183, "short", 63714, 254, noisyShirt);
+
+        List<Point> noisyLive = Arrays.asList(
+                new Point(8.4567f, 1.1060f), new Point(6.9915f, -0.1225f),
+                new Point(4.0539f, 1.9370f), new Point(1.9569f, 0.1122f));
+        assertContextKeepsNoisyShape(keys, "live", 281046, "love", 830324, 561, noisyLive);
+    }
+
+    @Test public void contextRespectsAnObservedIntermediateExcursion() {
+        List<KeyPosition> keys = qwerty();
+        List<Point> noisySock = Arrays.asList(
+                new Point(1.4970f, 0.9858f), new Point(7.8575f, -0.0250f),
+                new Point(2.9133f, 2.0620f), new Point(7.3927f, 1.0189f));
+        assertContextKeepsNoisyShape(keys, "sock", 4440, "stock", 16373, 123, noisySock);
+    }
+
+    @Test public void contextStillResolvesAmbiguousShapesAndInvisibleDoubleLetters() {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder neighboring = new SwipeDecoder(keys, entries("well", 2159909, "will", 1969807));
+        List<Point> noisyWell = Arrays.asList(
+                new Point(0.860937f, 0.113809f), new Point(1.944478f, -0.342557f),
+                new Point(8.846700f, 0.679145f), new Point(8.620901f, 0.942223f));
+        assertEquals("will", neighboring.decode(noisyWell, 2).get(0));
+        assertEquals("well", neighboring.decode(noisyWell, 2,
+                word -> word.equals("well") ? contextBonus(9423) : 0).get(0));
+
+        SwipeDecoder repeated = new SwipeDecoder(keys, entries("good", 1741730, "god", 611924));
+        List<Point> identicalShape = pathFor(keys, "good");
+        SwipeDecoder.ContextPrior afterFor = word -> word.equals("good") ? contextBonus(208)
+                : word.equals("god") ? contextBonus(142) : 0;
+        assertEquals("god", repeated.decode(identicalShape, 2).get(0));
+        assertEquals("good", repeated.decode(identicalShape, 2, afterFor).get(0));
+    }
+
+    @Test public void contextCanStillDistinguishKoreanSpellingsWithIdenticalKeyPaths() {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries("고리", 1000, "꼬리", 100));
+        List<Point> sharedPath = pathFor(keys, "rhfl");
+        assertEquals("고리", decoder.decode(sharedPath, 2).get(0));
+        assertEquals("꼬리", decoder.decode(sharedPath, 2,
+                word -> word.equals("꼬리") ? SwipeDecoder.MAX_CONTEXT_BONUS : 0).get(0));
+    }
+
     @Test public void nullAndInvalidContextBonusesPreserveGeometryRanking() {
         List<KeyPosition> keys = qwerty();
         SwipeDecoder decoder = new SwipeDecoder(keys, entries("bot", 944, "not", 4262273));
@@ -205,6 +291,32 @@ public class SwipeDecoderTest {
             result.add(new Entry((String) values[i], (Integer) values[i + 1]));
         }
         return result;
+    }
+
+    private static double contextBonus(long count) {
+        return SwipeDecoder.MAX_CONTEXT_BONUS * Math.min(1, Math.log1p(count) / Math.log1p(10000));
+    }
+
+    private static void assertContextKeepsClearShapes(List<KeyPosition> keys, String intended,
+                                                       int intendedFrequency, String alternative,
+                                                       int alternativeFrequency, long contextCount) {
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries(
+                intended, intendedFrequency, alternative, alternativeFrequency));
+        SwipeDecoder.ContextPrior prior = word -> word.equals(alternative) ? contextBonus(contextCount) : 0;
+        assertEquals(intended, decoder.decode(pathFor(keys, intended), 2, prior).get(0));
+        assertEquals(alternative, decoder.decode(pathFor(keys, alternative), 2, prior).get(0));
+    }
+
+    private static void assertContextKeepsNoisyShape(List<KeyPosition> keys, String intended,
+                                                      int intendedFrequency, String alternative,
+                                                      int alternativeFrequency, long contextCount,
+                                                      List<Point> path) {
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries(
+                intended, intendedFrequency, alternative, alternativeFrequency));
+        SwipeDecoder.ContextPrior prior = word -> word.equals(alternative) ? contextBonus(contextCount) : 0;
+        assertEquals(intended, decoder.decode(path, 2).get(0));
+        assertEquals(intended, decoder.decode(path, 2, prior).get(0));
+        assertEquals(alternative, decoder.decode(pathFor(keys, alternative), 2, prior).get(0));
     }
 
     private static Map<Character, KeyPosition> byKey(List<KeyPosition> keys) {

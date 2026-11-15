@@ -366,14 +366,60 @@ public class TypingCorrectorTest {
         assertNull(originalTrigram.contextCorrection);
     }
 
-    @Test public void bundledEnglishContextHandlesRealSentencesAndSentenceBoundaries() throws Exception {
-        File file = new File("src/main/assets/swipe/en_context.tsv");
-        if (!file.isFile()) file = new File("app/src/main/assets/swipe/en_context.tsv");
-        TypingCorrector.ContextModel context;
-        try (FileInputStream input = new FileInputStream(file)) {
-            context = EnglishContextModel.load(input);
-        }
+    @Test public void shortContextualTwoEditMatchesStayVisibleButAreNotAutomatic() throws Exception {
+        TypingCorrector.ContextModel context = bundledContext();
         TypingCorrector english = new TypingCorrector(asset("en"), false, context);
+        // A strongly supported phrase can rank a two-edit match above a one-edit spelling.
+        // Keep the match selectable, but do not automatically turn a transposition of "long"
+        // into "only" or expand short messages and initialisms based on context alone.
+        for (String[] phrase : new String[][]{{"is ", "olng", "only"},
+                {"the ", "mssg", "most"}, {"is ", "nsfw", "now"},
+                {"to ", "fwiw", "win"}, {"in ", "tmrw", "turn"}}) {
+            TypingCorrector.Result shortInput = english.suggest(phrase[1], 5, phrase[0]);
+            assertEquals(phrase[1], phrase[2], shortInput.bestSuggestion);
+            assertEquals(phrase[1], phrase[2], shortInput.candidates.get(1));
+            assertNull(phrase[1], shortInput.automaticSuggestion);
+            assertNull(phrase[1], shortInput.correction);
+            assertNull(phrase[1], english.suggestWithCompletions(phrase[1], 5, phrase[0])
+                    .automaticSuggestion);
+        }
+        assertTrue(english.suggest("olng", 5, "is ").candidates.contains("long"));
+        assertEquals("long", english.suggest("olng", 5).automaticSuggestion);
+        assertEquals("this", english.suggest("thid", 5).automaticSuggestion);
+        assertEquals("third", english.suggest("thid", 5, "the ").automaticSuggestion);
+        assertEquals("friend", english.suggest("frend", 5).automaticSuggestion);
+        assertEquals("colleague", english.suggest("collegue", 5).automaticSuggestion);
+        // Longer inputs still allow two missing letters to be corrected.
+        assertEquals("everything", english.suggest("evrythng", 5).automaticSuggestion);
+        assertEquals("colleague", english.suggest("colegue", 5).automaticSuggestion);
+    }
+
+    @Test public void exactThisIsProtectedEvenWithSavedThird() throws Exception {
+        TypingCorrector.ContextModel context = bundledContext();
+        TypingCorrector english = new TypingCorrector(asset("en"), false, context);
+        for (String text : Arrays.asList("this", "This")) {
+            for (String previous : Arrays.asList("the ", "about ", "is ")) {
+                TypingCorrector.Result exact = english.suggest(text, 5, previous);
+                assertTrue(text, exact.exactWord);
+                assertNull(text, exact.correction);
+                assertNull(text, exact.contextCorrection);
+                assertNull(text, exact.automaticSuggestion);
+            }
+        }
+        List<Entry> personalEntries = asset("en");
+        personalEntries.add(new Entry("third", 2_000_000));
+        TypingCorrector withSavedThird = new TypingCorrector(personalEntries, false, context);
+        for (String text : Arrays.asList("this", "This")) {
+            TypingCorrector.Result exact = withSavedThird.suggest(text, 5, "the ");
+            assertTrue(text, exact.exactWord);
+            assertNull(text, exact.correction);
+            assertNull(text, exact.contextCorrection);
+            assertNull(text, exact.automaticSuggestion);
+        }
+    }
+
+    @Test public void bundledEnglishContextHandlesRealSentencesAndSentenceBoundaries() throws Exception {
+        TypingCorrector english = new TypingCorrector(asset("en"), false, bundledContext());
         assertEquals("autocorrect", english.suggest("autocrrect", 5, "the ").bestSuggestion);
         TypingCorrector.Result isBot = english.suggest("bot", 5, "autocorrect is ");
         assertTrue(isBot.exactWord);
@@ -496,6 +542,14 @@ public class TypingCorrectorTest {
         List<Entry> entries = new ArrayList<>();
         for (int i = 0; i < values.length; i += 2) entries.add(new Entry((String) values[i], (Integer) values[i + 1]));
         return entries;
+    }
+
+    private static TypingCorrector.ContextModel bundledContext() throws Exception {
+        File file = new File("src/main/assets/swipe/en_context.tsv");
+        if (!file.isFile()) file = new File("app/src/main/assets/swipe/en_context.tsv");
+        try (FileInputStream input = new FileInputStream(file)) {
+            return EnglishContextModel.load(input);
+        }
     }
 
     private static final class Counts implements TypingCorrector.ContextModel {
