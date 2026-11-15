@@ -92,6 +92,8 @@ public final class AutoCorrectController {
     private Snapshot fallbackSelection;
     private Surrounding fallbackSurrounding;
     private ManualEdit manualEdit;
+    private ChosenWord chosenWord;
+    private ChosenWord pendingChosenSpace;
     private final ArrayDeque<FallbackTransition> pendingFallbackTransitions = new ArrayDeque<>();
 
     public AutoCorrectController(Context context, ConnectionProvider connections, Runnable beforeEdit) {
@@ -141,6 +143,7 @@ public final class AutoCorrectController {
             requestSuggestions();
         } else if (strip != null && boundary != null && validBoundaryLocation(boundary)) {
             showBoundaryCandidates(boundary);
+            if (!boundary.pending && boundary.predictions.isEmpty()) requestBoundaryPredictions(boundary);
         }
     }
 
@@ -171,7 +174,9 @@ public final class AutoCorrectController {
 
     /** Returns the verified caret after the current word boundary, including any correction. */
     public int getTrackedSpaceCursorPosition() {
-        if (closed || boundary == null) return -1;
+        // A prediction inserts its own space, but it must not extend the IME's timer for
+        // a preceding keyboard Space. Otherwise the next tap could become a period.
+        if (closed || boundary == null || !boundary.typedSpace) return -1;
         Boundary current = boundary;
         int position = getVerifiedCursorPosition();
         return position >= 0 && boundary == current && validBoundary(current) ? position : -1;
@@ -207,8 +212,22 @@ public final class AutoCorrectController {
     /** Completes a normal space that the caller inserted after commitSpace returned false. */
     public void onManualSpaceInserted() {
         if (closed) return;
+        ChosenWord chosen = pendingChosenSpace;
         finishManualEdit("", " ");
         clearAfterOwnedEdit();
+        if (chosen == null || strip == null || chosen.connection != connections.get() ||
+                chosen.version == Integer.MIN_VALUE || chosen.version != dictionaryVersion()) return;
+        ContextText after = readContext(chosen.connection);
+        String expected = tail(chosen.previousContext + chosen.word + chosen.punctuation + " ",
+                CONTEXT_LIMIT);
+        if (after == null || !validPosition(chosen.selection, after.selection, false) ||
+                !after.before.endsWith(expected) || !safeAfter(after.after)) return;
+        Boundary next = new Boundary(chosen.connection, chosen.word, chosen.punctuation,
+                chosen.previousContext, chosen.korean, isPersonalWord(chosen.word),
+                after.selection, chosen.version, generation);
+        boundary = next;
+        showBoundaryCandidates(next);
+        requestBoundaryPredictions(next);
     }
 
     /** Accounts for a keyboard-owned replacement while preserving queued keyboard events. */
@@ -224,6 +243,8 @@ public final class AutoCorrectController {
         clearWord();
         clearLiteral();
         literalBoundary = null;
+        chosenWord = null;
+        pendingChosenSpace = null;
         blocked = false;
         blockedSelection = null;
         boundary = null;
@@ -258,6 +279,8 @@ public final class AutoCorrectController {
         generation++;
         cancelQueuedSuggestions();
         clearWord();
+        chosenWord = null;
+        pendingChosenSpace = null;
         blocked = false;
         blockedSelection = null;
         boundary = null;
@@ -280,6 +303,8 @@ public final class AutoCorrectController {
     /** Called immediately after the IME inserts a manual letter or updates a Hangul syllable. */
     public void onTypedTextUpdated(boolean korean) {
         if (closed) return;
+        chosenWord = null;
+        pendingChosenSpace = null;
         finishManualTyping(korean);
         invalidateBoundary();
         trackLiteralTyping(korean);
@@ -322,6 +347,8 @@ public final class AutoCorrectController {
     /** Called immediately after a manually entered nonletter. Sentence punctuation is retained. */
     public void onNonLetterTyped() {
         if (closed) return;
+        chosenWord = null;
+        pendingChosenSpace = null;
         finishManualTyping(false);
         invalidateBoundary();
         trackLiteralTyping(false);
@@ -351,6 +378,8 @@ public final class AutoCorrectController {
     /** Called after ordinary backspace, including Hangul's intermediate composing updates. */
     public void onBackspaceTyped(boolean korean) {
         if (closed) return;
+        chosenWord = null;
+        pendingChosenSpace = null;
         finishManualBackspace(korean);
         invalidateBoundary();
         trackLiteralBackspace(korean);
@@ -398,6 +427,17 @@ public final class AutoCorrectController {
         }
         clearLiteral();
         if (emailOnly) { invalidateBoundary(); clearSuggestions(); return false; }
+        if (blocked && chosenWord != null && strip != null && validChosenWord(chosenWord)) {
+            // Keep the established manual-space path for an explicitly chosen candidate.
+            pendingChosenSpace = chosenWord;
+            chosenWord = null;
+            blocked = false;
+            blockedSelection = null;
+            invalidateBoundary();
+            return false;
+        }
+        chosenWord = null;
+        pendingChosenSpace = null;
         if (blocked || word == null || connection != wordConnection || text == null ||
                 !validTrackedText(text)) {
             clearWord(); blocked = false; blockedSelection = null; invalidateBoundary(); return false;
@@ -430,7 +470,7 @@ public final class AutoCorrectController {
         if (!next.pending) return true;
         try {
             worker.execute(() -> {
-                TypingCorrector.Result result = compute(original, language, version, previousContext);
+                TypingCorrector.Result result = compute(original, language, version, previousContext, false);
                 main.post(() -> finishBoundary(next, token, result));
             });
         } catch (RejectedExecutionException e) {
@@ -448,7 +488,10 @@ public final class AutoCorrectController {
         if (closed || busy || current == null || !current.automatic || !validBoundary(current)) return false;
         if (!replaceBoundary(current, current.original)) return false;
         current.automatic = false;
+        current.token = ++generation;
+        current.predictions = Collections.emptyList();
         showBoundaryCandidates(current);
+        requestBoundaryPredictions(current);
         return true;
     }
 
@@ -477,6 +520,7 @@ public final class AutoCorrectController {
             if (blockedSelection == null || !blockedSelection.equals(actual)) {
                 blocked = false;
                 blockedSelection = null;
+                chosenWord = null;
             }
             return;
         }
@@ -487,6 +531,8 @@ public final class AutoCorrectController {
         generation++;
         cancelQueuedSuggestions();
         clearWord(); clearLiteral(); blocked = false; blockedSelection = null; boundary = null; busy = false; clearSuggestions();
+        chosenWord = null;
+        pendingChosenSpace = null;
         // Pending input belongs to the original caret location, not the new selection.
         deferred.clear();
     }
@@ -496,6 +542,8 @@ public final class AutoCorrectController {
         generation++;
         cancelQueuedSuggestions();
         clearWord(); clearLiteral(); literalBoundary = null; blocked = false; blockedSelection = null; boundary = null; busy = false;
+        chosenWord = null;
+        pendingChosenSpace = null;
         deferred.clear();
         clearSuggestions();
         manualEdit = null;
@@ -612,7 +660,9 @@ public final class AutoCorrectController {
         current.learningFailed = false;
         current.version = dictionaryVersion();
         current.token = ++generation;
+        current.predictions = Collections.emptyList();
         showBoundaryCandidates(current);
+        requestBoundaryPredictions(current);
         // An older calculation may still complete, but it cannot overwrite this explicit choice.
         if (wasBusy) {
             if (validBoundaryLocation(current)) flushDeferred();
@@ -910,7 +960,7 @@ public final class AutoCorrectController {
                 synchronized (requestLock) { request = queuedSuggestion; queuedSuggestion = null; }
                 if (request != null) {
                     TypingCorrector.Result result = compute(request.word, request.korean,
-                            request.version, request.previousContext);
+                            request.version, request.previousContext, true);
                     main.post(() -> showSuggestions(request, result));
                 }
                 boolean again;
@@ -930,24 +980,20 @@ public final class AutoCorrectController {
     }
 
     private TypingCorrector.Result compute(String typed, boolean korean, int version,
-                                            String previousContext) {
+                                            String previousContext, boolean completions) {
         try {
             if (dictionaryVersion() != version) return null;
             int language = korean ? 1 : 0;
             if (engines[language] == null || engineVersions[language] != version) {
-                if (!korean && !contextModelLoaded) {
-                    try { contextModel = loader.loadContext(); }
-                    catch (IOException | RuntimeException e) {
-                        Log.w(TAG, "Could not load the typing context model", e);
-                    }
-                    contextModelLoaded = true;
-                }
+                if (!korean) ensureContextModelLoaded();
                 engines[language] = new TypingCorrector(loader.load(korean), korean,
                         korean ? null : contextModel);
                 engineVersions[language] = version;
             }
             TypingCorrector.Result result;
-            try { result = engines[language].suggest(typed, 5, previousContext); }
+            try { result = completions
+                    ? engines[language].suggestWithCompletions(typed, 5, previousContext)
+                    : engines[language].suggest(typed, 5, previousContext); }
             catch (RuntimeException e) {
                 Log.w(TAG, "Could not use typing context; falling back to spelling", e);
                 result = engines[language].suggest(typed, 5);
@@ -957,6 +1003,16 @@ public final class AutoCorrectController {
             Log.w(TAG, "Could not load or search the typing dictionary", e);
             return null;
         }
+    }
+
+    // Called on the worker, which owns the context-model cache.
+    private void ensureContextModelLoaded() {
+        if (contextModelLoaded) return;
+        try { contextModel = loader.loadContext(); }
+        catch (IOException | RuntimeException e) {
+            Log.w(TAG, "Could not load the typing context model", e);
+        }
+        contextModelLoaded = true;
     }
 
     private int dictionaryVersion() {
@@ -995,7 +1051,7 @@ public final class AutoCorrectController {
             current.candidates = result.candidates;
             String correction = useTopSuggestion ? result.contextCorrection : null;
             if (correction == null && !result.exactWord) {
-                correction = useTopSuggestion ? result.bestSuggestion : result.correction;
+                correction = useTopSuggestion ? result.automaticSuggestion : result.correction;
             }
             if (autoCorrectionEnabled && !current.protectedWord &&
                     correction != null && !correction.equals(current.original) &&
@@ -1009,6 +1065,7 @@ public final class AutoCorrectController {
             current.version = dictionaryVersion();
         }
         showBoundaryCandidates(current);
+        requestBoundaryPredictions(current);
         if (validBoundaryLocation(current)) flushDeferred();
         else { boundary = null; clearSuggestions(); deferred.clear(); }
     }
@@ -1046,19 +1103,37 @@ public final class AutoCorrectController {
 
     private void preserveChosenCandidate() {
         // Do not second-guess a candidate explicitly selected by the user at the next space.
+        ContextText text = readContext(wordConnection);
+        if (validTrackedText(text)) {
+            chosenWord = new ChosenWord(wordConnection, word, punctuation,
+                    precedingText(text.before, word + punctuation), korean, text.selection,
+                    dictionaryVersion());
+        } else {
+            chosenWord = null;
+        }
         clearWord();
         blocked = true;
         blockedSelection = selection(connections.get());
+    }
+
+    private boolean validChosenWord(ChosenWord chosen) {
+        if (chosen.connection != connections.get() || chosen.version == Integer.MIN_VALUE ||
+                chosen.version != dictionaryVersion()) return false;
+        ContextText text = readContext(chosen.connection);
+        String expected = tail(chosen.previousContext + chosen.word + chosen.punctuation, CONTEXT_LIMIT);
+        return text != null && chosen.selection.equals(text.selection) &&
+                text.before.endsWith(expected) && safeAfter(text.after);
     }
 
     private void showBoundaryCandidates(Boundary current) {
         if (strip == null || boundary != current) return;
         literalVisible = false;
         long token = current.token;
-        strip.setTypedCandidates(current.candidates, candidate -> {
+        SuggestionStripView shownStrip = strip;
+        shownStrip.setBoundaryCandidates(current.candidates, current.predictions, candidate -> {
             if (deferIfBusy(() -> selectBoundaryCandidate(current, token, candidate))) return;
             selectBoundaryCandidate(current, token, candidate);
-        });
+        }, candidate -> selectNextWord(current, token, candidate, shownStrip));
         showBoundaryLearning(current);
     }
 
@@ -1067,8 +1142,103 @@ public final class AutoCorrectController {
                 candidate == null || !validBoundary(current)) return;
         if (replaceBoundary(current, candidate)) {
             current.automatic = false;
+            current.token = ++generation;
+            current.predictions = Collections.emptyList();
             showBoundaryCandidates(current);
+            requestBoundaryPredictions(current);
         }
+    }
+
+    private void requestBoundaryPredictions(Boundary current) {
+        if (strip == null || closed || boundary != current || current.pending || current.korean ||
+                current.version == Integer.MIN_VALUE ||
+                !current.punctuation.isEmpty() || !validBoundary(current)) return;
+        final long token = current.token;
+        final int version = current.version;
+        final String output = current.output;
+        final String preceding = current.previousContext + output + " ";
+        try {
+            worker.execute(() -> {
+                List<String> predictions = Collections.emptyList();
+                try {
+                    if (dictionaryVersion() == version) ensureContextModelLoaded();
+                    if (dictionaryVersion() == version && contextModel != null) {
+                        predictions = validPredictions(contextModel.predict(preceding, 5));
+                    }
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "Could not predict the next word", e);
+                }
+                final List<String> result = predictions;
+                main.post(() -> {
+                    if (closed || strip == null || boundary != current || token != generation ||
+                            current.token != token || current.version != version ||
+                            !output.equals(current.output) || !validBoundary(current)) return;
+                    current.predictions = result;
+                    showBoundaryCandidates(current);
+                });
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The prior-word suggestions remain usable if prediction work is unavailable.
+        }
+    }
+
+    private static List<String> validPredictions(List<String> predictions) {
+        if (predictions == null || predictions.isEmpty()) return Collections.emptyList();
+        List<String> result = new ArrayList<>();
+        for (String candidate : predictions) {
+            if (candidate != null && validWord(candidate, false) && !result.contains(candidate)) {
+                result.add(candidate);
+                if (result.size() == 5) break;
+            }
+        }
+        return Collections.unmodifiableList(result);
+    }
+
+    private void selectNextWord(Boundary current, long token, String candidate,
+                                SuggestionStripView shownStrip) {
+        if (!validNextWordTarget(current, token, candidate, shownStrip)) return;
+        beforeEdit.run();
+        if (!validNextWordTarget(current, token, candidate, shownStrip)) return;
+        InputConnection connection = current.connection;
+        String inserted = candidate + " ";
+        beforeManualEdit();
+        applyingEdit = true;
+        boolean changed;
+        try { changed = connection.commitText(inserted, 1); }
+        finally { applyingEdit = false; }
+        finishManualEdit("", changed ? inserted : "");
+        if (!changed) {
+            if (!validBoundaryLocation(current)) cancel();
+            return;
+        }
+
+        ContextText after = readContext(connection);
+        String preceding = tail(current.previousContext + current.output + " ", CONTEXT_LIMIT);
+        long nextToken = ++generation;
+        cancelQueuedSuggestions();
+        if (connection != connections.get() || after == null ||
+                !after.before.endsWith(tail(preceding + inserted, CONTEXT_LIMIT)) ||
+                !safeAfter(after.after)) {
+            boundary = null;
+            clearSuggestions();
+            return;
+        }
+        Boundary next = new Boundary(connection, candidate, "", preceding, false,
+                isPersonalWord(candidate), after.selection, current.version, nextToken);
+        next.typedSpace = false;
+        boundary = next;
+        showBoundaryCandidates(next);
+        requestBoundaryPredictions(next);
+    }
+
+    private boolean validNextWordTarget(Boundary current, long token, String candidate,
+                                        SuggestionStripView shownStrip) {
+        if (closed || busy || strip != shownStrip || boundary != current || token != generation || current.token != token ||
+                candidate == null || !current.predictions.contains(candidate) || !validBoundary(current)) {
+            return false;
+        }
+        ContextText text = readContext(current.connection);
+        return text != null && safeAfter(text.after);
     }
 
     private boolean replaceBoundary(Boundary current, String replacement) {
@@ -1552,6 +1722,24 @@ public final class AutoCorrectController {
         }
     }
 
+    private static final class ChosenWord {
+        final InputConnection connection;
+        final String word, punctuation, previousContext;
+        final boolean korean;
+        final Snapshot selection;
+        final int version;
+        ChosenWord(InputConnection connection, String word, String punctuation,
+                   String previousContext, boolean korean, Snapshot selection, int version) {
+            this.connection = connection;
+            this.word = word;
+            this.punctuation = punctuation;
+            this.previousContext = previousContext;
+            this.korean = korean;
+            this.selection = selection;
+            this.version = version;
+        }
+    }
+
     private static final class Boundary {
         final InputConnection connection;
         final String original, punctuation, previousContext;
@@ -1564,7 +1752,9 @@ public final class AutoCorrectController {
         boolean pending;
         boolean protectedWord;
         boolean learningFailed;
+        boolean typedSpace = true;
         List<String> candidates;
+        List<String> predictions = Collections.emptyList();
         Boundary(InputConnection connection, String original, String punctuation, String previousContext,
                  boolean korean,
                  boolean protectedWord, Snapshot selection,

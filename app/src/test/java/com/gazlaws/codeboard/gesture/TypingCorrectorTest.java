@@ -49,6 +49,85 @@ public class TypingCorrectorTest {
         assertEquals("With", ENGLISH.suggest("Wih", 5).bestSuggestion);
     }
 
+    @Test public void commonMissingLettersBeatObscureNearbyKeyboardSubstitutions() {
+        for (String[] pair : new String[][]{
+                {"frend", "friend"}, {"collegue", "colleague"},
+                {"tht", "that"}, {"hve", "have"}, {"wikl", "will"},
+                {"speling", "spelling"}, {"mesage", "message"}}) {
+            TypingCorrector.Result result = ENGLISH.suggest(pair[0], 5);
+            assertEquals(pair[0], pair[1], result.bestSuggestion);
+            assertEquals(pair[0], pair[1], result.automaticSuggestion);
+            assertEquals(pair[0], pair[1], result.candidates.get(1));
+        }
+    }
+
+    @Test public void automaticSuggestionProtectsUncertainShortTextButRetainsCommonTypos() {
+        for (String shorthand : Arrays.asList("sry", "omw", "brb", "idk", "mssg", "imho")) {
+            TypingCorrector.Result result = ENGLISH.suggest(shorthand, 5);
+            assertEquals(shorthand, result.candidates.get(0));
+            assertNull(shorthand, result.automaticSuggestion);
+        }
+        for (String[] pair : new String[][]{{"tge", "the"}, {"teh", "the"},
+                {"wih", "with"}, {"thst", "that"}, {"thnks", "thanks"}}) {
+            assertEquals(pair[0], pair[1], ENGLISH.suggest(pair[0], 5).automaticSuggestion);
+        }
+    }
+
+    @Test public void completionsAreDisplayOnlyAndKeepTheSpellingChoiceVisible() {
+        TypingCorrector.Result partial = ENGLISH.suggestWithCompletions("hel", 5, null);
+        assertEquals("hel", partial.candidates.get(0));
+        assertTrue(partial.candidates.contains("hello"));
+        assertTrue(partial.candidates.contains("help"));
+        assertTrue(partial.exactWord);
+        assertNull(partial.automaticSuggestion);
+        assertNull(partial.correction);
+        assertNull(partial.contextCorrection);
+        assertFalse(ENGLISH.suggest("hel", 5, null).candidates.contains("hello"));
+
+        TypingCorrector.Result typo = ENGLISH.suggestWithCompletions("frend", 5, null);
+        assertEquals("friend", typo.automaticSuggestion);
+        assertEquals(typo.automaticSuggestion, typo.candidates.get(1));
+        assertTrue(ENGLISH.suggestWithCompletions("than", 5, null).candidates.contains("thanks"));
+        assertTrue(ENGLISH.suggestWithCompletions("HEL", 5, null).candidates.contains("HELLO"));
+        assertEquals(ENGLISH.suggest("hEl", 5).candidates,
+                ENGLISH.suggestWithCompletions("hEl", 5, null).candidates);
+        assertEquals(KOREAN.suggest("안녕하세여", 5).candidates,
+                KOREAN.suggestWithCompletions("안녕하세여", 5, "need ").candidates);
+    }
+
+    @Test public void observedContextRanksCompletionsAndMisspellingsWithoutInventingCounts() {
+        Counts counts = new Counts();
+        counts.put("need ", "help", 157, 0); // Observed, but below the missing-row floor.
+        TypingCorrector english = new TypingCorrector(entries("hel", 100, "hello", 10000,
+                "help", 5000), false, counts);
+        assertEquals("hello", english.suggestWithCompletions("hel", 5, null).candidates.get(1));
+        assertEquals("help", english.suggestWithCompletions("hel", 5, "need ").candidates.get(1));
+        assertEquals("help", english.suggest("hellp", 5, "need ").bestSuggestion);
+        assertNull(english.suggest("hel", 5, "need ").contextCorrection);
+    }
+
+    @Test public void shortTwoEditMatchesNeedEvidenceAndCannotAutoReplace() {
+        Counts counts = new Counts();
+        counts.put("is ", "much", 100000, 0);
+        counts.put("weak ", "much", 200, 0);
+        TypingCorrector english = new TypingCorrector(entries("nuh", 10, "much", 100000),
+                false, counts);
+        TypingCorrector.Result result = english.suggest("nuh", 5, "is ");
+        assertTrue(result.exactWord);
+        assertEquals("much", result.candidates.get(1));
+        assertNull(result.contextCorrection);
+        assertNull(result.automaticSuggestion);
+        assertFalse(english.suggest("nuh", 5, "weak ").candidates.contains("much"));
+        assertFalse(english.suggest("nuh", 5).candidates.contains("much"));
+
+        TypingCorrector unknown = new TypingCorrector(entries("much", 100000), false, counts);
+        TypingCorrector.Result expanded = unknown.suggest("muj", 5, "is ");
+        assertEquals("much", expanded.bestSuggestion);
+        assertNull(expanded.automaticSuggestion);
+        assertNull(expanded.correction);
+        assertFalse(unknown.suggest("muj", 5, "weak ").candidates.contains("much"));
+    }
+
     @Test public void exactWordsIncludingRareOnesAndCommonContractionsAreNeverReplaced() {
         for (String text : Arrays.asList("the", "hello", "helo", "dont", "don't", "DON’T", "my")) {
             TypingCorrector.Result result = ENGLISH.suggest(text, 6);
@@ -176,6 +255,15 @@ public class TypingCorrectorTest {
         assertTrue(korean.suggest("정마료", 5).candidates.contains("정말"));
         assertNull(korean.suggest("정마료", 5).correction);
         assertNull(korean.suggest("정마료", 5).bestSuggestion);
+    }
+
+    @Test public void englishRankingChangesDoNotOverrideKoreanKeyGeometry() {
+        TypingCorrector korean = new TypingCorrector(entries(
+                "안녕하세요", 1, "안녕하세아", 100000), true);
+        TypingCorrector.Result result = korean.suggest("안녕하세여", 5);
+        assertEquals("안녕하세요", result.candidates.get(1));
+        assertEquals("안녕하세아", result.candidates.get(2));
+        assertNull(result.correction);
     }
 
     @Test public void twoEditMatchesRemainSuggestionsOnly() {

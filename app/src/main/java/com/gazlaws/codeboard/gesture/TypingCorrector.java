@@ -23,11 +23,15 @@ public final class TypingCorrector {
     private static final int MAX_INPUT_LENGTH = 48;
     private static final int MAX_KEY_LENGTH = 64;
     private static final int MAX_RESULTS = 32;
-    private static final double FREQUENCY_WEIGHT = 0.18;
+    // Misspelling suggestions need enough prior to prefer a common word with a missing letter
+    // over an obscure word reached by a neighboring-key substitution. The much smaller original
+    // prior remains in force for automatic replacement of an existing dictionary word.
+    private static final double FREQUENCY_WEIGHT = 0.70;
+    private static final double EXACT_FREQUENCY_WEIGHT = 0.18;
     private static final double SHORT_WORD_FREQUENCY_WEIGHT = 1.9;
-    // Exact-word alternatives use the same weighted edit distance and bounded unigram prior as
-    // other spelling matches. Suggestions can use observed counts optimistically, but an automatic
-    // replacement compares against the estimated upper bound for omitted counts. In that stricter
+    // Exact-word automatic replacements retain a conservative edit cost and bounded unigram prior.
+    // Suggestions can use observed counts optimistically, but an automatic replacement compares
+    // against the estimated upper bound for omitted counts. In that stricter
     // comparison a candidate must beat the unedited word by 0.55 and every other alternative
     // by 0.40 edit-cost units. An unedited, common word has an additional bounded prior, and
     // observed context for it provides extra protection even when its count is below the floor.
@@ -54,6 +58,11 @@ public final class TypingCorrector {
 
         /** Conservative estimate for a trigram omitted from a truncated source. */
         default long trigramOmittedUpperBound() { return Long.MAX_VALUE; }
+
+        /** Common continuations after the supplied text, if the model supports prediction. */
+        default List<String> predict(String previousContext, int limit) {
+            return Collections.emptyList();
+        }
     }
 
     /** A context snapshot that can be reused across candidate lookups. */
@@ -78,20 +87,28 @@ public final class TypingCorrector {
         public final String correction;
         /** The highest-ranked eligible alternative, even when it is not a confident correction. */
         public final String bestSuggestion;
+        /** A spelling-only choice suitable for most-likely automatic replacement. */
+        public final String automaticSuggestion;
         /** A separately gated, high-confidence alternative to an exact English dictionary word. */
         public final String contextCorrection;
         public final boolean exactWord;
 
         private Result(List<String> candidates, String correction, String bestSuggestion,
                        boolean exactWord) {
-            this(candidates, correction, bestSuggestion, null, exactWord);
+            this(candidates, correction, bestSuggestion, null, null, exactWord);
         }
 
         private Result(List<String> candidates, String correction, String bestSuggestion,
                        String contextCorrection, boolean exactWord) {
+            this(candidates, correction, bestSuggestion, null, contextCorrection, exactWord);
+        }
+
+        private Result(List<String> candidates, String correction, String bestSuggestion,
+                       String automaticSuggestion, String contextCorrection, boolean exactWord) {
             this.candidates = Collections.unmodifiableList(candidates);
             this.correction = correction;
             this.bestSuggestion = bestSuggestion;
+            this.automaticSuggestion = automaticSuggestion;
             this.contextCorrection = contextCorrection;
             this.exactWord = exactWord;
         }
@@ -212,6 +229,85 @@ public final class TypingCorrector {
     }
 
     /**
+     * Adds English prefix completions for the suggestion strip. This method never turns a
+     * completion into a correction: all automatic fields come from the spelling-only search.
+     * Call {@link #suggest(String, int, String)} when a word boundary is committed.
+     */
+    public Result suggestWithCompletions(String typed, int limit, String previousContext) {
+        Result spelling = suggest(typed, limit, previousContext);
+        if (korean || limit <= 1 || typed == null) return spelling;
+        String normalized = normalize(typed, false);
+        if (normalized == null || normalized.length() < 2 || normalized.length() > MAX_INPUT_LENGTH
+                || caseStyle(typed) == CaseStyle.MIXED) return spelling;
+
+        int node = 0;
+        for (int i = 0; i < normalized.length(); i++) {
+            int child = firstChildren[node];
+            while (child != 0 && letters[child] != normalized.charAt(i)) child = nextSiblings[child];
+            if (child == 0) return spelling;
+            node = child;
+        }
+        ArrayList<Word> completions = new ArrayList<>();
+        collectCompletions(node, normalized.length(), completions);
+        if (completions.isEmpty()) return spelling;
+
+        PreparedContext context = contextModel == null || previousContext == null
+                || previousContext.isEmpty() ? null : contextModel.prepare(previousContext);
+        Map<Word, Double> scores = new IdentityHashMap<>();
+        for (Word word : completions) {
+            double score = Math.log1p(word.frequency) / frequencyScale;
+            if (context != null) {
+                ContextEvidence evidence = context.score(normalize(word.text, false));
+                if (evidence != null) score += Math.min(0.75, 0.35 * Math.max(
+                        observedContextSignal(evidence.bigramCount, contextModel.bigramOmittedUpperBound()),
+                        observedContextSignal(evidence.trigramCount, contextModel.trigramOmittedUpperBound())));
+            }
+            scores.put(word, score);
+        }
+        Collections.sort(completions, (a, b) -> {
+            int order = Double.compare(scores.get(b), scores.get(a));
+            if (order != 0) return order;
+            order = Integer.compare(b.frequency, a.frequency);
+            return order != 0 ? order : a.text.compareTo(b.text);
+        });
+
+        ArrayList<String> candidates = new ArrayList<>();
+        candidates.add(typed);
+        int max = Math.min(limit, MAX_RESULTS);
+        // Keep the strongest spelling correction visible while typing. On an exact spelling,
+        // preserve a saved canonical capitalization before adding completions.
+        if (spelling.contextCorrection != null) {
+            candidates.add(spelling.contextCorrection);
+        } else if (spelling.candidates.size() > 1 && (!spelling.exactWord
+                || spelling.candidates.get(1).equalsIgnoreCase(typed))) {
+            candidates.add(spelling.candidates.get(1));
+        }
+        CaseStyle style = caseStyle(typed);
+        for (Word completion : completions) {
+            if (candidates.size() >= max) break;
+            String shown = display(completion.text, style, typed);
+            if (!candidates.contains(shown)) candidates.add(shown);
+        }
+        for (String candidate : spelling.candidates) {
+            if (candidates.size() >= max) break;
+            if (!candidates.contains(candidate)) candidates.add(candidate);
+        }
+        return new Result(candidates, spelling.correction, spelling.bestSuggestion,
+                spelling.automaticSuggestion, spelling.contextCorrection, spelling.exactWord);
+    }
+
+    private void collectCompletions(int node, int prefixLength, List<Word> found) {
+        int floor = Math.min(1000, Math.max(1, maxFrequency / 10000));
+        for (int terminal = terminals[node]; terminal != 0; terminal = nextWords[terminal - 1]) {
+            Word word = words[terminal - 1];
+            if (word.keys.length() > prefixLength && word.frequency >= floor) found.add(word);
+        }
+        for (int child = firstChildren[node]; child != 0; child = nextSiblings[child]) {
+            collectCompletions(child, prefixLength, found);
+        }
+    }
+
+    /**
      * Suggests alternatives using text before the current token as optional context. A strongly
      * supported alternative to an exact English word is returned as contextCorrection.
      * The caller must still protect explicitly saved words and editor-specific identifiers.
@@ -241,9 +337,14 @@ public final class TypingCorrector {
             return new Result(candidates, null, null, false);
         }
 
-        // Short words are especially ambiguous; distance two is useful only on longer tokens.
-        int maxEdits = (korean ? countSyllables(normalized) >= 3 : keys.length() >= 5) ? 2 : 1;
+        // Distance-two matches for short English text are shown only with actual context
+        // evidence. They must not make an incomplete word an automatic correction.
+        boolean contextMayExpand = !korean && keys.length() >= 3 && keys.length() < 5
+                && contextModel != null && previousContext != null && !previousContext.isEmpty();
+        int maxEdits = (korean ? countSyllables(normalized) >= 3
+                : keys.length() >= 5 || contextMayExpand) ? 2 : 1;
         ArrayList<Match> matches = findMatches(keys, maxEdits);
+        if (contextMayExpand) retainSupportedTwoEditMatches(matches, previousContext);
         Collections.sort(matches, MATCH_ORDER);
         // Preserve the conservative decision while ranking short English suggestions with a
         // stronger frequency prior: one edit in three letters offers little spelling evidence.
@@ -272,7 +373,9 @@ public final class TypingCorrector {
             if (!shown.equals(typed) && !candidates.contains(shown)) candidates.add(shown);
         }
         String bestSuggestion = topSuggestion(normalized, typed, style, matches);
-        return new Result(candidates, correction, bestSuggestion, false);
+        String automaticSuggestion = automaticSuggestion(normalized, keys, bestSuggestion,
+                matches, previousContext);
+        return new Result(candidates, correction, bestSuggestion, automaticSuggestion, null, false);
     }
 
     private ArrayList<Match> findMatches(String keys, int maxEdits) {
@@ -285,6 +388,20 @@ public final class TypingCorrector {
         return matches;
     }
 
+    private void retainSupportedTwoEditMatches(List<Match> matches, String previousContext) {
+        PreparedContext prepared = contextModel.prepare(previousContext);
+        long bigramFloor = Math.max(1, contextModel.bigramOmittedUpperBound());
+        long trigramFloor = Math.max(1, contextModel.trigramOmittedUpperBound());
+        for (int i = matches.size() - 1; i >= 0; i--) {
+            Match match = matches.get(i);
+            if (match.edits <= 1) continue;
+            ContextEvidence evidence = prepared == null ? null
+                    : prepared.score(normalize(match.word.text, false));
+            if (evidence == null || (evidence.bigramCount <= bigramFloor
+                    && evidence.trigramCount <= trigramFloor)) matches.remove(i);
+        }
+    }
+
     private void rankWithContext(List<Match> matches, String previousContext, boolean shortWord) {
         if (contextModel == null || previousContext == null || previousContext.isEmpty()
                 || matches.size() < 2) return;
@@ -294,9 +411,12 @@ public final class TypingCorrector {
         boolean hasEvidence = false;
         for (Match match : matches) {
             ContextEvidence evidence = prepared.score(normalize(match.word.text, false));
-            double bonus = evidence == null ? 0 : Math.min(0.45,
-                    contextBonus(evidence.bigramCount, contextModel.bigramOmittedUpperBound())
-                            + contextBonus(evidence.trigramCount, contextModel.trigramOmittedUpperBound()));
+            // A low observed count is still useful for display ranking, even though an omitted
+            // phrase is not known to have a zero count. Never use this optimistic signal as the
+            // confidence test for replacing an exact word.
+            double bonus = evidence == null ? 0 : Math.min(0.75, 0.50 * Math.max(
+                    observedContextSignal(evidence.bigramCount, contextModel.bigramOmittedUpperBound()),
+                    observedContextSignal(evidence.trigramCount, contextModel.trigramOmittedUpperBound())));
             bonuses.put(match, bonus);
             hasEvidence |= bonus > 0;
         }
@@ -329,20 +449,33 @@ public final class TypingCorrector {
                 : Math.max(1, contextModel.trigramOmittedUpperBound());
         ArrayList<ExactMatch> ranked = new ArrayList<>();
         ExactMatch original = null;
-        for (Match match : findMatches(exactEntry.keys, 1)) {
+        int rareFrequency = Math.min(5000, Math.max(1000, maxFrequency / 10000));
+        boolean expand = prepared != null && exactEntry.frequency < rareFrequency;
+        for (Match match : findMatches(exactEntry.keys, expand ? 2 : 1)) {
             ContextEvidence evidence = prepared == null ? null
                     : prepared.score(normalize(match.word.text, false));
             if (evidence == null) evidence = new ContextEvidence(0, 0);
+            // This extra reach is only for display and only when the phrase was actually
+            // observed above the model's missing-row comparison floor.
+            if (match.edits > 1 && (match.word.keys.length() < 3
+                    || (evidence.bigramCount <= bigramFloor
+                    && evidence.trigramCount <= trigramFloor))) continue;
             // Bigram and trigram are alternative views of the same context, not independent
             // observations. Taking the maximum avoids inflating a weak trigram with a bigram.
-            double suggestionBonus = EXACT_SUGGESTION_CONTEXT_WEIGHT * Math.max(
+            double suggestionWeight = match.edits > 1 ? 1.20 : EXACT_SUGGESTION_CONTEXT_WEIGHT;
+            double suggestionBonus = suggestionWeight * Math.max(
                     Math.log1p((double) evidence.bigramCount / bigramFloor),
                     Math.log1p((double) evidence.trigramCount / trigramFloor));
+            if (match.edits > 1) suggestionBonus = Math.min(1.25, suggestionBonus);
             double confidenceBonus = EXACT_CONFIDENCE_CONTEXT_WEIGHT * Math.max(
                     conservativeContextSignal(evidence.bigramCount, bigramFloor),
                     conservativeContextSignal(evidence.trigramCount, trigramFloor));
+            // Keep the conservative edit and unigram model for exact-word replacement even
+            // though spelling suggestions use a stronger frequency prior.
+            double confidenceBase = weightedDistance(exactEntry.keys, match.word.keys, false)
+                    - EXACT_FREQUENCY_WEIGHT * Math.log1p(match.word.frequency) / frequencyScale;
             ExactMatch scored = new ExactMatch(match, evidence, match.score - suggestionBonus,
-                    match.score - confidenceBonus);
+                    confidenceBase - confidenceBonus);
             if (match.edits == 0) original = scored;
             else ranked.add(scored);
         }
@@ -358,6 +491,7 @@ public final class TypingCorrector {
 
         if (prepared == null || original == null || ranked.isEmpty()) return null;
         ExactMatch best = ranked.get(0);
+        if (best.match.edits != 1) return null;
         // A specific known phrase favoring the original vetoes a broader bigram. Counts of zero
         // mean missing data, so a candidate without a matching trigram cannot defeat that phrase.
         if (original.evidence.trigramCount > 0
@@ -381,13 +515,13 @@ public final class TypingCorrector {
         return count <= omittedUpperBound ? 0 : Math.log((double) count / omittedUpperBound);
     }
 
-    private static double observedContextSupport(long count, long omittedUpperBound) {
-        return Math.min(1.0, Math.log1p(count) / Math.log1p(omittedUpperBound));
+    private static double observedContextSignal(long count, long omittedUpperBound) {
+        if (count <= 0) return 0;
+        return Math.log1p((double) count / Math.max(1, omittedUpperBound));
     }
 
-    private static double contextBonus(long count, long omittedUpperBound) {
-        long floor = Math.max(1, omittedUpperBound);
-        return count <= floor ? 0 : 0.1 * Math.log((double) count / floor);
+    private static double observedContextSupport(long count, long omittedUpperBound) {
+        return Math.min(1.0, Math.log1p(count) / Math.log1p(omittedUpperBound));
     }
 
     private String topSuggestion(String normalized, String typed, CaseStyle style,
@@ -402,6 +536,73 @@ public final class TypingCorrector {
             return null;
         }
         return display(best.word.text, style, typed);
+    }
+
+    private String automaticSuggestion(String normalized, String keys, String suggestion,
+                                       List<Match> matches, String previousContext) {
+        if (suggestion == null || matches.isEmpty()) return null;
+        if (korean) return suggestion;
+        Match best = matches.get(0);
+        int length = letterCount(normalized);
+        int frequencyFloor = Math.min(30000, Math.max(100, maxFrequency / 1000));
+        // Short unknown words often are initials, text shorthand, or a name. Requiring a
+        // frequent and plausible single keystroke error avoids forcing "omw" to "mow"
+        // and similar guesses while retaining common cases such as "teh" and "wih".
+        if (length == 3) {
+            if (best.edits != 1 || best.word.frequency < frequencyFloor
+                    || letterCount(best.word.keys) < 3) return null;
+            if (best.word.keys.length() < keys.length()) return null;
+            if (best.word.keys.length() == keys.length()
+                    && !singleTransposition(keys, best.word.keys)
+                    && !singleAdjacentSubstitution(keys, best.word.keys)
+                    && !strongContextFor(best, matches, previousContext)) return null;
+        }
+        // An all-consonant abbreviation should not collapse into a shorter one. Missing-vowel
+        // typos such as "thnks" can still resolve to a longer common spelling.
+        if (length == 4 && best.word.frequency < frequencyFloor
+                && !strongContextFor(best, matches, previousContext)) return null;
+        if (length <= 4 && !hasEnglishVowel(normalized) && !hasEnglishVowel(best.word.keys)
+                && best.word.keys.length() <= keys.length()) return null;
+        return suggestion;
+    }
+
+    private boolean strongContextFor(Match best, List<Match> matches, String previousContext) {
+        if (contextModel == null || previousContext == null || previousContext.isEmpty()) return false;
+        PreparedContext prepared = contextModel.prepare(previousContext);
+        if (prepared == null) return false;
+        ContextEvidence evidence = prepared.score(normalize(best.word.text, false));
+        if (evidence == null) return false;
+        double bestSignal = Math.max(
+                (double) evidence.bigramCount / Math.max(1, contextModel.bigramOmittedUpperBound()),
+                (double) evidence.trigramCount / Math.max(1, contextModel.trigramOmittedUpperBound()));
+        if (bestSignal < 3) return false;
+        for (Match alternative : matches) {
+            if (alternative == best) continue;
+            ContextEvidence other = prepared.score(normalize(alternative.word.text, false));
+            if (other != null && Math.max(
+                    (double) other.bigramCount / Math.max(1, contextModel.bigramOmittedUpperBound()),
+                    (double) other.trigramCount / Math.max(1, contextModel.trigramOmittedUpperBound()))
+                    * 2 >= bestSignal) return false;
+        }
+        return true;
+    }
+
+    private static boolean hasEnglishVowel(String word) {
+        for (int i = 0; i < word.length(); i++) {
+            if ("aeiou".indexOf(word.charAt(i)) >= 0) return true;
+        }
+        return false;
+    }
+
+    private static boolean singleAdjacentSubstitution(String input, String target) {
+        if (input.length() != target.length()) return false;
+        int differences = 0;
+        for (int i = 0; i < input.length(); i++) {
+            char a = input.charAt(i), b = target.charAt(i);
+            if (a == b) continue;
+            if (++differences > 1 || substitutionCost(a, b) >= 1.0) return false;
+        }
+        return differences == 1;
     }
 
     private String confidentCorrection(String normalized, String keys, String typed,
@@ -452,8 +653,9 @@ public final class TypingCorrector {
         if (current[input.length()] <= maxEdits) {
             for (int terminal = terminals[node]; terminal != 0; terminal = nextWords[terminal - 1]) {
                 Word word = words[terminal - 1];
-                double editCost = weightedDistance(input, word.keys);
-                double frequencyBonus = FREQUENCY_WEIGHT * Math.log1p(word.frequency) / frequencyScale;
+                double editCost = weightedDistance(input, word.keys, !korean);
+                double frequencyBonus = (korean ? EXACT_FREQUENCY_WEIGHT : FREQUENCY_WEIGHT)
+                        * Math.log1p(word.frequency) / frequencyScale;
                 matches.add(new Match(word, current[input.length()], editCost - frequencyBonus));
             }
         }
@@ -462,7 +664,7 @@ public final class TypingCorrector {
         }
     }
 
-    private static double weightedDistance(String input, String target) {
+    private static double weightedDistance(String input, String target, boolean favorMissingKey) {
         double[] beforePrevious = null;
         double[] previous = new double[input.length() + 1];
         for (int j = 1; j < previous.length; j++) {
@@ -470,11 +672,11 @@ public final class TypingCorrector {
         }
         for (int i = 1; i <= target.length(); i++) {
             double[] current = new double[input.length() + 1];
-            current[0] = previous[0] + removalCost(target, i - 1);
+            current[0] = previous[0] + removalCost(target, i - 1) * (favorMissingKey ? 0.8 : 1.0);
             for (int j = 1; j < current.length; j++) {
                 char a = input.charAt(j - 1), b = target.charAt(i - 1);
                 double substitute = previous[j - 1] + (a == b ? 0 : substitutionCost(a, b));
-                double insert = previous[j] + removalCost(target, i - 1);
+                double insert = previous[j] + removalCost(target, i - 1) * (favorMissingKey ? 0.8 : 1.0);
                 double delete = current[j - 1] + removalCost(input, j - 1);
                 double value = Math.min(substitute, Math.min(insert, delete));
                 if (beforePrevious != null && j > 1 && a == target.charAt(i - 2)

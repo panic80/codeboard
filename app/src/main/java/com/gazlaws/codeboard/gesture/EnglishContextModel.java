@@ -5,8 +5,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -21,15 +23,20 @@ public final class EnglishContextModel implements TypingCorrector.ContextModel {
     private static final long BIGRAM_OMITTED_FLOOR = 210;
     private static final long TRIGRAM_OMITTED_FLOOR = 130;
     private static final int MAX_WORD_LENGTH = 24;
+    private static final int MAX_PREDICTIONS = 5;
     private static final TypingCorrector.ContextEvidence NO_EVIDENCE =
             new TypingCorrector.ContextEvidence(0, 0);
 
     private final Map<String, Long> bigrams;
     private final Map<String, Long> trigrams;
+    private final Map<String, List<String>> pairPredictions;
+    private final Map<String, List<String>> triplePredictions;
 
     private EnglishContextModel(Map<String, Long> bigrams, Map<String, Long> trigrams) {
         this.bigrams = Collections.unmodifiableMap(bigrams);
         this.trigrams = Collections.unmodifiableMap(trigrams);
+        this.pairPredictions = predictionIndex(bigrams);
+        this.triplePredictions = predictionIndex(trigrams);
     }
 
     /**
@@ -78,6 +85,71 @@ public final class EnglishContextModel implements TypingCorrector.ContextModel {
     @Override
     public TypingCorrector.ContextEvidence score(String precedingText, String candidate) {
         return prepare(precedingText).score(candidate);
+    }
+
+    /** Returns observed continuations, preferring the more specific two-word context. */
+    @Override
+    public List<String> predict(String precedingText, int limit) {
+        if (limit <= 0) return Collections.emptyList();
+        PreparedContext context = prepare(precedingText);
+        if (context.pairPrefix == null) return Collections.emptyList();
+        int count = Math.min(limit, MAX_PREDICTIONS);
+        ArrayList<String> result = new ArrayList<>(count);
+        if (context.triplePrefix != null) {
+            addPredictions(result, triplePredictions.get(
+                    context.triplePrefix.substring(0, context.triplePrefix.length() - 1)), count);
+        }
+        addPredictions(result, pairPredictions.get(
+                context.pairPrefix.substring(0, context.pairPrefix.length() - 1)), count);
+        return Collections.unmodifiableList(result);
+    }
+
+    private static void addPredictions(List<String> result, List<String> candidates, int limit) {
+        if (candidates == null) return;
+        for (String candidate : candidates) {
+            if (result.size() == limit) break;
+            String shown = candidate.equals("i") || candidate.startsWith("i'")
+                    ? "I" + candidate.substring(1) : candidate;
+            if (!result.contains(shown)) result.add(shown);
+        }
+    }
+
+    /** Keep only the most frequent continuations per prefix, with deterministic ties. */
+    private static Map<String, List<String>> predictionIndex(Map<String, Long> phrases) {
+        Map<String, List<Prediction>> groups = new HashMap<>();
+        for (Map.Entry<String, Long> phrase : phrases.entrySet()) {
+            int separator = phrase.getKey().lastIndexOf(' ');
+            String prefix = phrase.getKey().substring(0, separator);
+            Prediction next = new Prediction(phrase.getKey().substring(separator + 1), phrase.getValue());
+            List<Prediction> group = groups.get(prefix);
+            if (group == null) {
+                group = new ArrayList<>();
+                groups.put(prefix, group);
+            }
+            int index = 0;
+            while (index < group.size() && group.get(index).compareTo(next) <= 0) index++;
+            if (index < MAX_PREDICTIONS) {
+                group.add(index, next);
+                if (group.size() > MAX_PREDICTIONS) group.remove(MAX_PREDICTIONS);
+            }
+        }
+        Map<String, List<String>> result = new HashMap<>();
+        for (Map.Entry<String, List<Prediction>> group : groups.entrySet()) {
+            List<String> words = new ArrayList<>(group.getValue().size());
+            for (Prediction prediction : group.getValue()) words.add(prediction.word);
+            result.put(group.getKey(), Collections.unmodifiableList(words));
+        }
+        return Collections.unmodifiableMap(result);
+    }
+
+    private static final class Prediction implements Comparable<Prediction> {
+        final String word;
+        final long count;
+        Prediction(String word, long count) { this.word = word; this.count = count; }
+        @Override public int compareTo(Prediction other) {
+            int order = Long.compare(other.count, count);
+            return order != 0 ? order : word.compareTo(other.word);
+        }
     }
 
     @Override

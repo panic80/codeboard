@@ -21,6 +21,8 @@ import androidx.core.graphics.ColorUtils;
 import com.gazlaws.codeboard.R;
 import com.gazlaws.codeboard.theme.ThemeInfo;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /** A horizontally scrollable suggestion row with a fixed personal-dictionary action. */
@@ -40,6 +42,7 @@ public class SuggestionStripView extends LinearLayout {
     private final TextView learnWord;
     private CharSequence hintText = "Swipe across letters to type";
     private boolean showingHint = true;
+    private boolean compactBoundary;
 
     public SuggestionStripView(Context context, ThemeInfo theme) {
         super(context);
@@ -115,21 +118,81 @@ public class SuggestionStripView extends LinearLayout {
         setCandidates(candidates, listener, true);
     }
 
+    /** Shows prior-word alternatives alongside separately marked next-word choices. */
+    public void setBoundaryCandidates(List<String> candidates, List<String> nextWords,
+                                      OnCandidateClickListener replaceListener,
+                                      OnCandidateClickListener appendListener) {
+        content.removeAllViews();
+        List<String> prior = displayableItems(candidates);
+        List<String> next = displayableItems(nextWords);
+        boolean compact = !next.isEmpty();
+        compactBoundary = compact;
+        int count = 0, priorIndex = 0, nextIndex = 0;
+        // Retain the original and leading spelling alternative before the first prediction,
+        // so that the first next word is visible even on a narrow keyboard.
+        while (priorIndex < prior.size() && priorIndex < 2) {
+            count = addCandidates(Collections.singletonList(prior.get(priorIndex++)),
+                    replaceListener, true, false, 5, count, compact);
+        }
+        if (nextIndex < next.size()) {
+            count = addCandidates(Collections.singletonList(next.get(nextIndex++)),
+                    appendListener, false, true, 5, count, compact);
+        }
+        while (count < 5 && (priorIndex < prior.size() || nextIndex < next.size())) {
+            if (priorIndex < prior.size()) {
+                count = addCandidates(Collections.singletonList(prior.get(priorIndex++)),
+                        replaceListener, true, false, 5, count, compact);
+            }
+            if (count < 5 && nextIndex < next.size()) {
+                count = addCandidates(Collections.singletonList(next.get(nextIndex++)),
+                        appendListener, false, true, 5, count, compact);
+            }
+        }
+        finishCandidates(count);
+    }
+
     private void setCandidates(List<String> candidates, OnCandidateClickListener listener,
                                boolean markTypedWord) {
+        compactBoundary = false;
         content.removeAllViews();
-        int count = 0;
+        int count = addCandidates(candidates, listener, markTypedWord, false, 5, 0);
+        finishCandidates(count);
+    }
+
+    private static List<String> displayableItems(List<String> candidates) {
+        List<String> result = new ArrayList<>();
+        if (candidates != null) {
+            for (String candidate : candidates) {
+                if (candidate != null && !candidate.isEmpty()) result.add(candidate);
+                if (result.size() == 5) break;
+            }
+        }
+        return result;
+    }
+
+    private int addCandidates(List<String> candidates, OnCandidateClickListener listener,
+                              boolean markTypedWord, boolean nextWord, int limit, int count) {
+        return addCandidates(candidates, listener, markTypedWord, nextWord, limit, count, false);
+    }
+
+    private int addCandidates(List<String> candidates, OnCandidateClickListener listener,
+                              boolean markTypedWord, boolean nextWord, int limit, int count,
+                              boolean compact) {
         if (candidates != null) {
             for (String candidate : candidates) {
                 if (candidate == null || candidate.isEmpty()) continue;
-                if (count == 5) break;
+                if (count == limit) break;
                 TextView text = createTextView();
-                text.setText(candidate);
+                String label = nextWord ? getResources().getString(R.string.next_word_label, candidate) : candidate;
+                text.setText(label);
                 text.setEllipsize(TextUtils.TruncateAt.END);
                 if (markTypedWord && count == 0) {
                     text.setTypeface(text.getTypeface(), Typeface.ITALIC);
                     text.setContentDescription(getResources().getString(
                             R.string.inline_learning_typed_word_description, candidate));
+                } else if (nextWord) {
+                    text.setContentDescription(getResources().getString(
+                            R.string.next_word_description, candidate));
                 }
                 text.setClickable(listener != null);
                 text.setFocusable(listener != null);
@@ -137,10 +200,10 @@ public class SuggestionStripView extends LinearLayout {
                     text.setOnClickListener(v -> listener.onCandidateClick(candidate));
                 }
                 float density = getResources().getDisplayMetrics().density;
-                int padding = Math.round(16 * density);
-                int minWidth = Math.round(96 * density);
-                int maxWidth = Math.round(180 * density);
-                int neededWidth = (int) Math.ceil(text.getPaint().measureText(candidate)) + padding * 2;
+                int padding = Math.round((compact ? 10 : 16) * density);
+                int minWidth = Math.round((compact ? 88 : 96) * density);
+                int maxWidth = Math.round((compact ? 88 : 180) * density);
+                int neededWidth = (int) Math.ceil(text.getPaint().measureText(label)) + padding * 2;
                 text.setPadding(padding, 0, padding, 0);
                 content.addView(text, new LayoutParams(
                         Math.min(maxWidth, Math.max(minWidth, neededWidth)),
@@ -148,6 +211,10 @@ public class SuggestionStripView extends LinearLayout {
                 count++;
             }
         }
+        return count;
+    }
+
+    private void finishCandidates(int count) {
         showingHint = count == 0;
         if (showingHint) showHint();
         candidateScroll.scrollTo(0, 0);
@@ -234,6 +301,15 @@ public class SuggestionStripView extends LinearLayout {
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        if (compactBoundary && MeasureSpec.getMode(widthMeasureSpec) != MeasureSpec.UNSPECIFIED) {
+            float density = getResources().getDisplayMetrics().density;
+            int actionWidth = learnAction.getVisibility() == GONE ? 0 : learnAction.getLayoutParams().width;
+            int available = Math.max(0, MeasureSpec.getSize(widthMeasureSpec) - actionWidth);
+            int width = Math.max(Math.round(48 * density), Math.min(Math.round(88 * density), available / 3));
+            for (int i = 0; i < content.getChildCount(); i++) {
+                content.getChildAt(i).getLayoutParams().width = width;
+            }
+        }
         int height = resolveSize(heightPx, heightMeasureSpec);
         super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY));
     }

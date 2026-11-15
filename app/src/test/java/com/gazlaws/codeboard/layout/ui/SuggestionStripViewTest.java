@@ -92,6 +92,42 @@ public class SuggestionStripViewTest {
         assertEquals(word, f.word.getText().toString());
     }
 
+    @Test public void boundarySeparatesReplacementAndNextWordActions() {
+        Fixture f = new Fixture();
+        AtomicReference<String> replacement = new AtomicReference<>();
+        AtomicReference<String> appended = new AtomicReference<>();
+        f.strip.setBoundaryCandidates(Arrays.asList("you", "your", "young", "yours"),
+                Arrays.asList("for", "can", "are"), replacement::set, appended::set);
+        f.strip.setLearnWord("you", () -> { });
+        f.layout(360);
+        assertEquals(5, f.strip.getCandidateCount());
+        assertEquals("you", f.strip.getCandidateView(0).getText().toString());
+        assertEquals("→ for", f.strip.getCandidateView(2).getText().toString());
+        assertEquals("Insert next word: for", f.strip.getCandidateView(2).getContentDescription().toString());
+        TextView firstPrediction = f.strip.getCandidateView(2);
+        float labelRight = firstPrediction.getLeft() + (firstPrediction.getWidth()
+                + firstPrediction.getPaint().measureText(firstPrediction.getText().toString())) / 2f;
+        assertTrue("The first next word should be visible beside Add", labelRight <= f.scroll.getWidth());
+        assertTrue(f.strip.getCandidateView(1).performClick());
+        assertEquals("your", replacement.get());
+        assertTrue(f.strip.getCandidateView(2).performClick());
+        assertEquals("for", appended.get());
+    }
+
+    @Test public void nextWordRemainsVisibleAfterLongBoundaryAlternatives() {
+        Fixture f = new Fixture();
+        f.strip.setBoundaryCandidates(Arrays.asList("communication", "communications"),
+                Collections.singletonList("for"), candidate -> { }, candidate -> { });
+        f.strip.setLearnWord("communication", () -> { });
+        f.layout(360);
+        TextView prediction = f.strip.getCandidateView(2);
+        assertEquals("→ for", prediction.getText().toString());
+        assertTrue(prediction.getRight() <= f.scroll.getWidth());
+        assertEquals(TextUtils.TruncateAt.END, f.strip.getCandidateView(0).getEllipsize());
+        f.layout(320);
+        assertTrue("The next word remains visible at 320 dp", prediction.getRight() <= f.scroll.getWidth());
+    }
+
     @Test public void saveAndFailureFeedbackAreNotClickableAndClearOnRequest() {
         Fixture f = new Fixture();
         f.strip.setLearnWord("teh", () -> { });
@@ -135,7 +171,11 @@ public class SuggestionStripViewTest {
         }
 
         void layout() {
-            int width = Math.round(320 * density);
+            layout(320);
+        }
+
+        void layout(int widthDp) {
+            int width = Math.round(widthDp * density);
             strip.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(Math.round(48 * density), View.MeasureSpec.EXACTLY));
             strip.layout(0, 0, strip.getMeasuredWidth(), strip.getMeasuredHeight());

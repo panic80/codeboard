@@ -26,6 +26,8 @@ import org.robolectric.annotation.Config;
 import org.robolectric.annotation.LooperMode;
 
 import java.io.IOException;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -93,6 +95,113 @@ public class AutoCorrectControllerTest {
         click(0);
         assertEquals("teh ", text());
         assertFalse(controller.undoCorrection());
+    }
+
+    @Test public void predictionsFollowTheActualCorrectionAndUndo() throws Exception {
+        loader.contextModel = contextModel("the\tcat\t90\nteh\tdog\t80\n");
+        type("teh");
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("the ", text());
+        assertTrue(candidateIndex("→ cat") >= 0);
+        assertLearning("Add word", true);
+        assertTrue(controller.undoCorrection());
+        assertEquals("teh ", text());
+        assertEquals(-1, candidateIndex("→ cat"));
+        drain();
+        assertTrue(candidateIndex("→ dog") >= 0);
+        assertEquals(4, controller.getTrackedSpaceCursorPosition());
+        click(candidateIndex("→ dog"));
+        assertEquals("teh dog ", text());
+        assertEquals(-1, controller.getTrackedSpaceCursorPosition());
+    }
+
+    @Test public void staleNextWordCannotInsertAfterPriorWordOrCaretChanges() throws Exception {
+        loader.contextModel = contextModel("the\tcat\t90\nteh\tdog\t80\n");
+        type("teh");
+        assertTrue(controller.commitSpace());
+        drain();
+        int oldIndex = candidateIndex("→ cat");
+        assertTrue(oldIndex >= 0);
+        TextView oldView = candidateView(oldIndex);
+        View.OnClickListener oldTap = shadowOf(oldView).getOnClickListener();
+        controller.setSuggestionStrip(null);
+        oldTap.onClick(oldView);
+        assertEquals("the ", text());
+        controller.setSuggestionStrip(strip);
+        click(0);
+        oldTap.onClick(oldView);
+        assertEquals("teh ", text());
+        drain();
+        int newIndex = candidateIndex("→ dog");
+        assertTrue(newIndex >= 0);
+        Selection.setSelection(editor.getText(), 1);
+        click(newIndex);
+        assertEquals("teh ", text());
+    }
+
+    @Test public void chosenCompletionThenManualSpaceOffersNextWord() throws Exception {
+        loader.entries.add(new SwipeDecoder.Entry("you", 100000));
+        loader.contextModel = contextModel("you\tcan\t100\nthank\tyou\tfor\t50\n");
+        setText("thank ");
+        type("yo");
+        drain();
+        int completion = candidateIndex("you");
+        assertTrue(completion >= 0);
+        click(completion);
+        assertEquals("thank you", text());
+        assertFalse(controller.commitSpace());
+        controller.beforeManualEdit();
+        connection.commitText(" ", 1);
+        controller.onManualSpaceInserted();
+        drain();
+        int prediction = candidateIndex("→ for");
+        assertTrue(prediction >= 0);
+        click(prediction);
+        assertEquals("thank you for ", text());
+    }
+
+    @Test public void chosenCompletionAlsoPredictsWithVerifiedFallbackSelection() throws Exception {
+        loader.entries.add(new SwipeDecoder.Entry("you", 100000));
+        loader.contextModel = contextModel("you\tcan\t100\nthank\tyou\tfor\t50\n");
+        setText("thank ");
+        connection.noExtractedText = true;
+        controller.onStartInput(connection, 6, 6);
+        typeFallback("yo");
+        drain();
+        int completion = candidateIndex("you");
+        assertTrue(completion >= 0);
+        click(completion);
+        assertFalse(controller.commitSpace());
+        controller.beforeManualEdit();
+        connection.commitText(" ", 1);
+        controller.onManualSpaceInserted();
+        drain();
+        int prediction = candidateIndex("→ for");
+        assertTrue(prediction >= 0);
+        click(prediction);
+        assertEquals("thank you for ", text());
+    }
+
+    @Test public void longContextKeepsPredictionsAfterAnExplicitNextWord() throws Exception {
+        loader.contextModel = contextModel("you\tcan\t100\nthank\tyou\tfor\t50\nfor\tme\t40\n");
+        String prefix = new String(new char[300]).replace('\0', 'x') + " thank ";
+        setText(prefix);
+        type("you");
+        assertTrue(controller.commitSpace());
+        drain();
+        int first = candidateIndex("→ for");
+        assertTrue(first >= 0);
+        click(first);
+        assertEquals(prefix + "you for ", text());
+        drain();
+        assertTrue(candidateIndex("→ me") >= 0);
+        click(candidateIndex("→ me"));
+        assertEquals(prefix + "you for me ", text());
+    }
+
+    private EnglishContextModel contextModel(String rows) throws IOException {
+        return EnglishContextModel.load(new ByteArrayInputStream(rows.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test public void candidateChoiceReplacesWholeCurrentWordAndIsNotOverriddenAtSpace() {

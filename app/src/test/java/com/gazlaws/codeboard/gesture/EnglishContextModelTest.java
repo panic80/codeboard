@@ -6,6 +6,9 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -63,6 +66,44 @@ public class EnglishContextModelTest {
         assertEquals(0, model.score("chat ", "not").bigramCount);
         assertTrue(model.bigramOmittedUpperBound() > 0);
         assertTrue(model.trigramOmittedUpperBound() > 0);
+    }
+
+    @Test public void predictionsPreferObservedTrigramsThenFillFromRankedBigrams() throws Exception {
+        String rows = "you\tcan\t90\nyou\twill\t80\nyou\tcan\t10\n"
+                + "you\tfor\t70\nyou\talways\t70\nyou\tnever\t1\n"
+                + "thank\tyou\tfor\t3\nthank\tyou\tcan\t2\n";
+        EnglishContextModel model = EnglishContextModel.load(new ByteArrayInputStream(
+                rows.getBytes(StandardCharsets.UTF_8)));
+        assertEquals(Arrays.asList("for", "can", "will", "always", "never"),
+                model.predict("Thank YOU ", 100));
+        assertEquals(Arrays.asList("can", "will", "always"), model.predict("you ", 3));
+        assertEquals(Collections.emptyList(), model.predict("you ", 0));
+        List<String> immutable = model.predict("you ", 5);
+        try {
+            immutable.add("anything");
+            throw new AssertionError("Predictions must be immutable");
+        } catch (UnsupportedOperationException expected) { }
+    }
+
+    @Test public void predictionDoesNotBridgePunctuationOrLineBreaks() throws Exception {
+        String rows = "you\tcan\t9\nthank\tyou\tfor\t3\n";
+        EnglishContextModel model = EnglishContextModel.load(new ByteArrayInputStream(
+                rows.getBytes(StandardCharsets.UTF_8)));
+        assertEquals(Collections.emptyList(), model.predict("you. ", 5));
+        assertEquals(Collections.emptyList(), model.predict("you\n", 5));
+        assertEquals(Collections.singletonList("can"), model.predict("thank. you ", 5));
+        assertEquals(Collections.singletonList("can"), model.predict("thank\nyou ", 5));
+    }
+
+    @Test public void bundledCorpusPredictsACommonTrigram() throws Exception {
+        assertEquals("for", realModel().predict("thank you ", 5).get(0));
+    }
+
+    @Test public void firstPersonPredictionsUseCanonicalCapitalization() throws Exception {
+        String rows = "and\ti\t10\nand\ti'm\t9\nand\tiraq\t8\n";
+        EnglishContextModel model = EnglishContextModel.load(new ByteArrayInputStream(
+                rows.getBytes(StandardCharsets.UTF_8)));
+        assertEquals(Arrays.asList("I", "I'm", "iraq"), model.predict("and ", 5));
     }
 
     private static EnglishContextModel realModel() throws Exception {
