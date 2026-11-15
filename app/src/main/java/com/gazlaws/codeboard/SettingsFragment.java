@@ -131,6 +131,17 @@ public class SettingsFragment extends PreferenceFragmentCompat implements IOnFoc
             return false;
         }
         switch (preference.getKey()) {
+            case "clear_typing_learning":
+                new AlertDialog.Builder(requireActivity()).setTitle("Clear learned typing?")
+                        .setMessage("This resets automatic learning and tap calibration. Your manually added dictionary words are kept.")
+                        .setPositiveButton("Clear", (dialog, which) -> {
+                            new com.gazlaws.codeboard.gesture.AdaptiveTypingModel(requireContext()).clear();
+                            new com.gazlaws.codeboard.gesture.TouchModel(requireContext()).clear();
+                        }).setNegativeButton("Cancel", null).show();
+                return true;
+            case "typing_benchmark":
+                startActivity(new Intent(requireActivity(), TypingBenchmarkActivity.class));
+                return true;
             case "personal_dictionary":
                 showPersonalDictionary();
                 return true;

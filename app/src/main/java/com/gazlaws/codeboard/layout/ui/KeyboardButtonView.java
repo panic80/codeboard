@@ -60,6 +60,8 @@ public class KeyboardButtonView extends View {
                 cursorDragging = false;
                 spaceStartX = cursorAnchorX = event.getX();
                 spaceStartY = event.getY();
+                if (getParent() instanceof KeyboardLayoutView)
+                    ((KeyboardLayoutView) getParent()).recordTap(this, event.getX(), event.getY());
                 beginPress(false);
                 break;
             case MotionEvent.ACTION_MOVE:

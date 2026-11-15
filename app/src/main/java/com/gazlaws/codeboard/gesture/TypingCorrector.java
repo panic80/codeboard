@@ -103,7 +103,7 @@ public final class TypingCorrector {
             this(candidates, correction, bestSuggestion, null, contextCorrection, exactWord);
         }
 
-        private Result(List<String> candidates, String correction, String bestSuggestion,
+        Result(List<String> candidates, String correction, String bestSuggestion,
                        String automaticSuggestion, String contextCorrection, boolean exactWord) {
             this.candidates = Collections.unmodifiableList(candidates);
             this.correction = correction;
@@ -180,10 +180,10 @@ public final class TypingCorrector {
         this(entries, korean, null);
     }
 
-    /** Adds an optional English context model. Korean never uses English context. */
+    /** Adds an optional context model supplied for the active language. */
     public TypingCorrector(List<SwipeDecoder.Entry> entries, boolean korean, ContextModel contextModel) {
         this.korean = korean;
-        this.contextModel = korean ? null : contextModel;
+        this.contextModel = contextModel;
         Map<String, Word> bySpelling = new HashMap<>();
         if (entries != null) {
             for (SwipeDecoder.Entry entry : entries) {
@@ -410,7 +410,7 @@ public final class TypingCorrector {
         Map<Match, Double> bonuses = new IdentityHashMap<>();
         boolean hasEvidence = false;
         for (Match match : matches) {
-            ContextEvidence evidence = prepared.score(normalize(match.word.text, false));
+            ContextEvidence evidence = prepared.score(normalize(match.word.text, korean));
             // A low observed count is still useful for display ranking, even though an omitted
             // phrase is not known to have a zero count. Never use this optimistic signal as the
             // confidence test for replacing an exact word.

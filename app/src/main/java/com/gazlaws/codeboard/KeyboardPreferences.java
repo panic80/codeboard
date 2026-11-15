@@ -18,6 +18,10 @@ public class KeyboardPreferences {
                 PreferenceManager.getDefaultSharedPreferences(contextWrapper);
     }
 
+    public boolean isLearningEnabled() { return read("adaptive_learning", true); }
+    public boolean isTouchLearningEnabled() { return read("adaptive_touch", true); }
+    public boolean isChatSpacingEnabled() { return read("chat_spacing", false); }
+
     public boolean isFirstStart() {
         return read("FIRST_START", true);
     }

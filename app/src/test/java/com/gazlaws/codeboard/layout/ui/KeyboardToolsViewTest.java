@@ -33,7 +33,7 @@ public class KeyboardToolsViewTest {
         panel.layout(0, 0, panel.getMeasuredWidth(), panel.getMeasuredHeight());
         int[] ids = { R.id.keyboard_tools_emoji, R.id.keyboard_tools_clipboard,
                 R.id.keyboard_tools_voice, R.id.keyboard_tools_resize,
-                R.id.keyboard_tools_language, R.id.keyboard_tools_settings };
+                R.id.keyboard_tools_language, R.id.keyboard_tools_settings, R.id.keyboard_tools_review, R.id.keyboard_tools_practice };
         int minimum = Math.round(48 * density);
         for (int id : ids) {
             View button = panel.findViewById(id);

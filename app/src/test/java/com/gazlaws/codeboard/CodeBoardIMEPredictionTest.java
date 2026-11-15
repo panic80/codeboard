@@ -142,7 +142,8 @@ public class CodeBoardIMEPredictionTest {
             assertTrue(f.canAdd("they"));
             assertTrue(f.action().performClick());
             assertTrue(new PersonalDictionary(context).getWords().contains("they"));
-            // Isolate the next pass from the dictionary change in this one.
+            // Isolate the next pass from both explicit dictionary edits and the learned rejection.
+            new com.gazlaws.codeboard.gesture.AdaptiveTypingModel(context).clear();
             context.getSharedPreferences("personal_dictionary", Context.MODE_PRIVATE).edit().clear().commit();
         }
     }

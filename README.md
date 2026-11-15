@@ -38,6 +38,20 @@ Use **Features > Personal dictionary > Add word or email** to save an English or
 
 Email addresses can also be saved from the suggestion row after typing a complete address, including digits, dots and plus tags. Use **SYM** for `@` and `+`; switching pages preserves the address being entered. Type the beginning of a saved address and tap its suggestion to reuse it. Addresses remain literal, are never automatically spell-corrected, and do not enter the swipe dictionary. Email fields support these literal suggestions unless the app requests no suggestions.
 
+### Adaptive typing and accuracy tools
+
+**Features > Learn from my typing** is enabled by default. Verified uncorrected word commits build a bounded local vocabulary and phrase history. An unfamiliar word becomes a suggestion after three commits, or immediately after explicitly choosing its spelling. Choosing an alternative twice can favor that same correction in future typing or swipe results. Undoing an automatic correction suppresses that original/replacement pair until an explicit choice teaches it again. Automatically generated corrections are not learned as user examples. Learning can be switched off or reset with **Clear learned typing**; explicitly added personal-dictionary words are retained.
+
+**Adapt to my taps** uses actual tap positions as bounded suggestion evidence. Explicitly choosing a spelling calibrates per-key offsets, separately for portrait/landscape, English/Korean, and keyboard-size buckets. It does not change the key labels or force taps onto a different key. Ordinary spelling corrections remain available when tap positions provide no useful distinction.
+
+Context now includes an authored conversational seed in English and Korean, plus learned continuations using up to four preceding words. English retains the bundled corpus counts. Korean gains next-word predictions and contextual spelling/swipe ranking. These are compact statistical models, not a pretrained neural language model or a general Korean grammar engine. The small authored seed is suggestion evidence, not measured word frequency. Missing-space suggestions are offered only when both words are in the dictionary and their phrase has support; they require a tap and preserve the original token.
+
+**Tools > Review text** previews basic English grammar, missing-space and Korean spacing/spelling repairs for a message of up to 2,000 characters with the cursor at its end. Tap **Apply** to accept or **Undo** to restore the original while the editor remains unchanged. **Features > Chat punctuation repair** additionally allows this review to suggest spaces for semicolons between words. It is off by default, and never rewrites semicolons automatically while coding. This is a limited rule-based review, not unrestricted AI rewriting.
+
+**Tools > Typing test** (also in Features) provides held-out English/Korean sentences, final character/word error rates, typing speed, and a count of characters removed during editing. Use the same prompts with another selected keyboard for comparison. Learning is disabled in the practice field. Only the last aggregate result is saved locally; phone timing and accuracy must be measured on the device, not inferred from unit tests.
+
+Learning and tap calibration are disabled in passwords, email/URL fields, fields requesting no suggestions, and fields marked `IME_FLAG_NO_PERSONALIZED_LEARNING`. Learned history is excluded from cloud backup and device transfer. No typing is sent to a server. The authored seed files `en_phrases.txt` and `ko_phrases.txt` use the application's code license.
+
 ### Keyboard tools and typing conveniences
 
 Tap **Tools** beside **SYM** for emoji, clipboard, voice typing, resize, language switching and settings. The emoji picker includes categories and recent selections. Its Backspace removes a complete supported emoji, including flags and variation selectors.

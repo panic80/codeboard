@@ -54,6 +54,17 @@ public class CodeBoardIMESwipeTest {
         if (fixture != null) fixture.service.destroy();
     }
 
+    @Test public void explicitSwipeAlternativeIsLearnedLocally() throws Exception {
+        Fixture f = start(false, InputType.TYPE_CLASS_TEXT);
+        f.swipe("hello"); f.await(() -> f.candidateCount() > 1);
+        String original = f.text();
+        String selected = f.candidate(1).getText().toString();
+        assertTrue(f.candidate(1).performClick());
+        assertEquals(selected, f.text());
+        com.gazlaws.codeboard.gesture.AdaptiveTypingModel model = new com.gazlaws.codeboard.gesture.AdaptiveTypingModel(RuntimeEnvironment.getApplication());
+        assertEquals(1, model.choices(original, selected));
+    }
+
     @Test public void englishGestureShowsAlternativesAndTapsContinueNormally() throws Exception {
         Fixture f = start(false, InputType.TYPE_CLASS_TEXT);
         f.swipe("hello");

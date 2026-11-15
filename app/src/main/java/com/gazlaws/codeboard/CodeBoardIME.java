@@ -47,6 +47,7 @@ import com.gazlaws.codeboard.input.KoreanKeyMap;
 import com.gazlaws.codeboard.gesture.SwipeDecoder;
 import com.gazlaws.codeboard.gesture.SwipeTypingController;
 import com.gazlaws.codeboard.gesture.AutoCorrectController;
+import com.gazlaws.codeboard.gesture.TouchModel;
 import com.gazlaws.codeboard.layout.Box;
 import com.gazlaws.codeboard.layout.Definitions;
 import com.gazlaws.codeboard.layout.Key;
@@ -1189,9 +1190,79 @@ public class CodeBoardIME extends InputMethodService
                     startActivity(new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                     break;
                 case VOICE: startVoiceInput(); break;
+                case REVIEW: showTextReview(); break;
+                case PRACTICE:
+                    startActivity(new Intent(this, TypingBenchmarkActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    break;
             }
         });
         inputContainer.addKeyboardView(auxiliaryPanel, 0);
+    }
+
+    @android.annotation.SuppressLint("SetTextI18n")
+    private void showTextReview() {
+        hideAuxiliaryPanel();
+        InputConnection connection = getCurrentInputConnection();
+        if (!isOrdinaryTypingField() || connection == null) return;
+        finishKoreanComposition(connection);
+        if (swipeTypingController != null) swipeTypingController.finish(connection, false);
+        int cursor = verifiedEditorCursor();
+        CharSequence before = connection.getTextBeforeCursor(2001, 0);
+        CharSequence after = connection.getTextAfterCursor(1, 0);
+        if (before == null || after == null || after.length() != 0 || before.length() > 2000
+                || cursor < 0 || cursor != before.length()) {
+            Toast.makeText(this, "Place the cursor at the end of a message under 2,000 characters.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String original = before.toString();
+        String proposed = com.gazlaws.codeboard.input.TextReview.review(original,
+                new KeyboardPreferences(this).isChatSpacingEnabled());
+        android.widget.LinearLayout panel = new android.widget.LinearLayout(this);
+        panel.setOrientation(android.widget.LinearLayout.VERTICAL);
+        panel.setPadding(16, 12, 16, 12);
+        android.widget.TextView preview = new android.widget.TextView(this);
+        preview.setTextColor(mKeyboardUiFactory.theme.foregroundColor);
+        preview.setText(proposed.equals(original) ? "No supported repairs found. This is a basic English/Korean checker."
+                : "Suggested text:\n" + proposed);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(preview); panel.addView(scroll, new android.widget.LinearLayout.LayoutParams(-1,
+                Math.round(140 * getResources().getDisplayMetrics().density)));
+        android.widget.Button apply = new android.widget.Button(this);
+        apply.setText("Apply"); apply.setEnabled(!proposed.equals(original));
+        final boolean[] applied = {false};
+        apply.setOnClickListener(v -> {
+            String expected = applied[0] ? proposed : original;
+            String replacement = applied[0] ? original : proposed;
+            CharSequence current = connection.getTextBeforeCursor(2001, 0);
+            CharSequence following = connection.getTextAfterCursor(1, 0);
+            if (connection != getCurrentInputConnection() || current == null || following == null
+                    || following.length() != 0 || !expected.contentEquals(current)
+                    || verifiedEditorCursor() != expected.length()) {
+                hideAuxiliaryPanel(); return;
+            }
+            cancelTypingState();
+            if (autoCorrectController != null) autoCorrectController.beforeManualEdit();
+            boolean changed = false;
+            connection.beginBatchEdit();
+            try {
+                if (connection.deleteSurroundingText(expected.length(), 0)) {
+                    changed = connection.commitText(replacement, 1);
+                    if (!changed) connection.commitText(expected, 1);
+                }
+            } finally { connection.endBatchEdit(); }
+            if (autoCorrectController != null) autoCorrectController.onManualTextReplaced(
+                    changed ? expected : "", changed ? replacement : "");
+            if (changed) {
+                applied[0] = !applied[0]; apply.setText(applied[0] ? "Undo" : "Apply");
+                preview.setText(applied[0] ? replacement : "Suggested text:\n" + proposed);
+            }
+        });
+        panel.addView(apply);
+        android.widget.Button done = new android.widget.Button(this); done.setText("Done");
+        done.setOnClickListener(v -> hideAuxiliaryPanel()); panel.addView(done);
+        auxiliaryPanel = panel;
+        mCurrentKeyboardLayoutView.setVisibility(View.GONE);
+        inputContainer.addKeyboardView(panel, 0);
     }
 
     private void applyKeyboardSize(int height, int width) {
@@ -1300,7 +1371,31 @@ public class CodeBoardIME extends InputMethodService
                 && variation != InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD;
     }
 
+    // This flag is an inlined bit, also understood by Codeboard on API 23-25.
+    @SuppressLint("InlinedApi")
+    private boolean allowsPersonalLearning() {
+        return sEditorInfo != null && supportsAutoCorrectInputType(sEditorInfo.inputType)
+                && (sEditorInfo.imeOptions & EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING) == 0;
+    }
+
+    private void onTypingTap(char letter, float x, float y, List<SwipeGesture.KeyPosition> keys, int width, int height) {
+        if (deferPendingInput(() -> onTypingTap(letter, x, y, keys, width, height))) return;
+        if (autoCorrectController == null || !allowsPersonalLearning() || ctrl) return;
+        List<SwipeDecoder.KeyPosition> geometry = new ArrayList<>();
+        for (SwipeGesture.KeyPosition key : keys)
+            geometry.add(new SwipeDecoder.KeyPosition(key.letter, key.x, key.y, key.width, key.height));
+        float density = getResources().getDisplayMetrics().density;
+        String profile = (isLandscape() ? "L" : "P") + (koreanLayoutSelected && koreanMode ? "K" : "E")
+                + Math.round(width / density / 40) + ":" + Math.round(height / density / 40);
+        autoCorrectController.recordTap(new TouchModel.Sample(letter, x, y, profile, geometry));
+    }
+
     private void updateSwipeAvailability() {
+        KeyboardPreferences preferences = new KeyboardPreferences(this);
+        boolean learning = allowsPersonalLearning();
+        if (autoCorrectController != null) autoCorrectController.setLearningEnabled(
+                learning && preferences.isLearningEnabled(), learning && preferences.isTouchLearningEnabled());
+        if (swipeTypingController != null) swipeTypingController.setLearningEnabled(learning && preferences.isLearningEnabled());
         if (swipeTypingController != null) {
             swipeTypingController.setContextRankingEnabled(autoCorrectEnabled && useTopSuggestion
                     && sEditorInfo != null && supportsAutoCorrectInputType(sEditorInfo.inputType));
@@ -1308,6 +1403,7 @@ public class CodeBoardIME extends InputMethodService
         if (mCurrentKeyboardLayoutView == null) return;
         boolean enabled = isSwipeAvailable();
         mCurrentKeyboardLayoutView.configureSwipe(enabled, this::onSwipeGesture);
+        mCurrentKeyboardLayoutView.setTapListener(learning ? this::onTypingTap : null);
         if (swipeSuggestions != null) swipeSuggestions.setVisibility(
                 enabled || (spellingSuggestionsEnabled && isTypingAssistAvailable()) ? View.VISIBLE : View.GONE);
         refreshSuggestionHint();
@@ -1445,11 +1541,8 @@ public class CodeBoardIME extends InputMethodService
             mNotificationReceiver = new NotificationReceiver(this);
             final IntentFilter pFilter = new IntentFilter(NotificationReceiver.ACTION_SHOW);
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                registerReceiver(mNotificationReceiver, pFilter, Context.RECEIVER_NOT_EXPORTED);
-            } else {
-                registerReceiver(mNotificationReceiver, pFilter);
-            }
+            androidx.core.content.ContextCompat.registerReceiver(this, mNotificationReceiver,
+                    pFilter, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED);
 
 
             Intent imeIntent = new Intent(NotificationReceiver.ACTION_SHOW);

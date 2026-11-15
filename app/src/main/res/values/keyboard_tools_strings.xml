@@ -31,4 +31,8 @@
     <item name="emoji_recent_empty" type="id" />
     <item name="emoji_backspace" type="id" />
     <item name="emoji_done" type="id" />
+    <string name="keyboard_tools_review">Review text</string>
+    <string name="keyboard_tools_practice">Typing test</string>
+    <item name="keyboard_tools_review" type="id" />
+    <item name="keyboard_tools_practice" type="id" />
 </resources>

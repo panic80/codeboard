@@ -216,6 +216,92 @@ public class CodeBoardIMEAutoCorrectTest {
         assertEquals("teh", f.composingText());
     }
 
+    @Test public void undoSuppressesTheSameCorrectionOnTheNextWord() throws Exception {
+        Fixture f = start(false, true, InputType.TYPE_CLASS_TEXT);
+        f.type("teh "); f.await(() -> f.text().equals("the "));
+        f.tap(-5); assertEquals("teh ", f.text());
+        f.type("teh "); f.waitForIdle();
+        assertEquals("teh teh ", f.text());
+        assertTrue(new com.gazlaws.codeboard.gesture.AdaptiveTypingModel(f.context).rejected("teh", "the"));
+    }
+
+    @Test public void repeatedAcceptedPhrasesCreateLocalPredictions() throws Exception {
+        Fixture f = start(false, true, InputType.TYPE_CLASS_TEXT);
+        f.type("see you soon "); f.waitForIdle();
+        f.type("see you soon "); f.waitForIdle();
+        assertEquals("soon", new com.gazlaws.codeboard.gesture.AdaptiveTypingModel(f.context).predict("see you ",1).get(0));
+    }
+
+    @Test public void explicitChoiceTrainsTapCalibrationAndLocalVocabulary() throws Exception {
+        Fixture f = start(false, true, InputType.TYPE_CLASS_TEXT);
+        f.type("hello"); f.await(() -> f.hasCandidate("hello"));
+        f.candidate("hello").performClick(); f.waitForIdle();
+        assertTrue(f.context.getSharedPreferences("touch_model", Context.MODE_PRIVATE).getAll().size() > 0);
+        assertFalse(new com.gazlaws.codeboard.gesture.AdaptiveTypingModel(f.context).entries(false).isEmpty());
+    }
+
+    @Test public void noPersonalizedLearningFieldDoesNotTrainEitherModel() throws Exception {
+        Fixture f = start(false, true, InputType.TYPE_CLASS_TEXT);
+        EditorInfo info = new EditorInfo(); info.inputType = InputType.TYPE_CLASS_TEXT;
+        info.imeOptions = EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
+        f.ime.onStartInput(info, false);
+        f.type("hello"); f.await(() -> f.hasCandidate("hello"));
+        f.candidate("hello").performClick(); f.waitForIdle();
+        assertTrue(new com.gazlaws.codeboard.gesture.AdaptiveTypingModel(f.context).entries(false).isEmpty());
+        assertTrue(f.context.getSharedPreferences("touch_model", Context.MODE_PRIVATE).getAll().isEmpty());
+    }
+
+    @Test public void learningStillWorksDuringFastTypingWithAutocorrectionOff() throws Exception {
+        Fixture f = start(false, true, InputType.TYPE_CLASS_TEXT);
+        Field field = CodeBoardIME.class.getDeclaredField("autoCorrectController"); field.setAccessible(true);
+        ((com.gazlaws.codeboard.gesture.AutoCorrectController)field.get(f.ime)).setAutoCorrectionEnabled(false);
+        f.type("zorbax zorbax zorbax "); f.waitForIdle();
+        assertEquals("zorbax zorbax zorbax ", f.text());
+        assertTrue(new com.gazlaws.codeboard.gesture.AdaptiveTypingModel(f.context).entries(false).stream().anyMatch(e -> e.word.equals("zorbax")));
+    }
+
+    @Test public void rejectedSpaceDoesNotBecomeALearningObservation() throws Exception {
+        Fixture f = start(false, true, InputType.TYPE_CLASS_TEXT);
+        Field field = CodeBoardIME.class.getDeclaredField("autoCorrectController"); field.setAccessible(true);
+        com.gazlaws.codeboard.gesture.AutoCorrectController controller = (com.gazlaws.codeboard.gesture.AutoCorrectController)field.get(f.ime);
+        controller.setAutoCorrectionEnabled(false);
+        f.type("zorbax"); f.waitForIdle();
+        f.connection.rejectSpace = true;
+        assertFalse(controller.commitSpace());
+        assertEquals(0, new com.gazlaws.codeboard.gesture.AdaptiveTypingModel(f.context).preference("", "zorbax"), .00001);
+    }
+
+    @Test public void reviewAppliesAndUndoesOnlyAnUnchangedEditorSnapshot() throws Exception {
+        Fixture f = start(false, true, InputType.TYPE_CLASS_TEXT);
+        f.connection.commitText("I is here.", 1);
+        java.lang.reflect.Method review = CodeBoardIME.class.getDeclaredMethod("showTextReview"); review.setAccessible(true);
+        review.invoke(f.ime);
+        Field field = CodeBoardIME.class.getDeclaredField("auxiliaryPanel"); field.setAccessible(true);
+        android.view.ViewGroup panel = (android.view.ViewGroup)field.get(f.ime);
+        android.widget.Button apply = (android.widget.Button)panel.getChildAt(1);
+        assertTrue(apply.performClick()); assertEquals("I am here.", f.text());
+        assertTrue(apply.performClick()); assertEquals("I is here.", f.text());
+        f.connection.commitText(" Extra", 1);
+        apply.performClick(); assertEquals("I is here. Extra", f.text());
+    }
+
+    @Test public void koreanNextWordPredictionsAppendAndContinueInKorean() throws Exception {
+        Fixture f = start(true, true, InputType.TYPE_CLASS_TEXT);
+        f.typeKorean("sodlf"); f.tap(' ');
+        f.await(() -> f.hasCandidate("→ 아침에"));
+        assertTrue(f.candidate("→ 아침에").performClick());
+        f.await(() -> f.hasCandidate("→ 다시"));
+        assertEquals("내일 아침에 ", f.text());
+    }
+
+    @Test public void supportedMissingSpaceIsAManualSuggestion() throws Exception {
+        Fixture f = start(false, true, InputType.TYPE_CLASS_TEXT);
+        f.type("seeyou"); f.await(() -> f.hasCandidate("see you"));
+        assertEquals("seeyou", f.text());
+        assertTrue(f.candidate("see you").performClick()); f.tap(' '); f.waitForIdle();
+        assertEquals("see you ", f.text());
+    }
+
     private Fixture start(boolean korean, boolean autoCorrect, int inputType) {
         fixture = new Fixture(korean, autoCorrect, inputType);
         return fixture;
@@ -400,6 +486,10 @@ public class CodeBoardIMEAutoCorrectTest {
     private static final class RecordingConnection extends BaseInputConnection {
         final EditText editor;
         final List<KeyEvent> events = new ArrayList<>();
+        boolean rejectSpace;
+        @Override public boolean commitText(CharSequence text, int cursor) {
+            return !(rejectSpace && " ".contentEquals(text)) && super.commitText(text, cursor);
+        }
         RecordingConnection(EditText editor) {
             super(editor, true);
             this.editor = editor;

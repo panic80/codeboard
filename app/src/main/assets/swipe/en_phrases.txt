@@ -1,0 +1,51 @@
+# Authored conversational examples, not corpus frequencies. Same license as application code.
+can you help me with this
+can you please send me the details
+could you please let me know
+please let me know when you arrive
+i would like to know more
+i am going to the store
+i am going to be late
+i am on my way home
+i will be there in a few minutes
+i will call you when i arrive
+i don't know what to do
+i don't think that is right
+i think we should try again
+thank you for your help
+thanks for letting me know
+how are you doing today
+how do i get there
+what do you want to do
+what time does the meeting start
+what time will you be home
+where would you like to meet
+let me know if you need help
+let's meet at the usual place
+i have a lot of work
+there are a lot of people
+i need to go to work
+i need some help with this
+it is not working properly
+this is not what i meant
+that is a good idea
+this looks much better now
+please try again later
+see you tomorrow morning
+see you in a few minutes
+have a good day
+i hope you are doing well
+i am looking forward to seeing you
+we need to fix this issue
+can we change the meeting time
+the keyboard is working better
+the word should be strike
+how much does it cost
+what is the best way to do this
+please send me an email
+please check the attached file
+let me check and get back to you
+get back to me when you can
+would you like to come with us
+is there anything else i can do
+it would be nice to see you

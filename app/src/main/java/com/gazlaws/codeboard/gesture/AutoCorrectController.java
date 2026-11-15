@@ -38,6 +38,7 @@ public final class AutoCorrectController {
         List<SwipeDecoder.Entry> load(boolean korean) throws IOException;
         default int version() { return 0; }
         default TypingCorrector.ContextModel loadContext() throws IOException { return null; }
+        default TypingCorrector.ContextModel loadContext(boolean korean) throws IOException { return korean ? null : loadContext(); }
     }
 
     interface PersonalWordStore {
@@ -62,6 +63,15 @@ public final class AutoCorrectController {
     private final int[] engineVersions = {Integer.MIN_VALUE, Integer.MIN_VALUE};
     private TypingCorrector.ContextModel contextModel;
     private boolean contextModelLoaded;
+    private TypingCorrector.ContextModel koreanContextModel;
+    private boolean koreanContextLoaded;
+    private AdaptiveTypingModel adaptive;
+    private TouchModel touchModel;
+    private volatile boolean learningEnabled, touchEnabled;
+    private volatile int adaptationEpoch;
+    private final ArrayList<TouchModel.Sample> taps = new ArrayList<>();
+    private TouchModel.Sample pendingTap;
+    private final BoundarySuggestions[] boundaries = new BoundarySuggestions[2];
 
     private SuggestionStripView strip;
     private InputConnection wordConnection;
@@ -100,6 +110,8 @@ public final class AutoCorrectController {
         this(connections, beforeEdit, Executors.newSingleThreadExecutor(), null,
                 assetLoader(context.getApplicationContext()), new Handler(Looper.getMainLooper()),
                 personalWordStore(new PersonalDictionary(context.getApplicationContext())));
+        adaptive = new AdaptiveTypingModel(context);
+        touchModel = new TouchModel(context);
     }
 
     /** Package-private dependencies permit deterministic testing of work and cancellation. */
@@ -122,6 +134,26 @@ public final class AutoCorrectController {
         this.loader = loader;
         this.main = main;
         this.personalWords = personalWords;
+    }
+
+    public void setLearningEnabled(boolean enabled, boolean touch) {
+        if (learningEnabled == enabled && touchEnabled == touch) return;
+        learningEnabled = enabled; touchEnabled = touch;
+        adaptationEpoch++;
+        cancel();
+    }
+
+    public void recordTap(TouchModel.Sample sample) { pendingTap = touchEnabled ? sample : null; }
+
+    private void confirmChoice(String previous, String original, String chosen, List<TouchModel.Sample> samples) {
+        if (learningEnabled && adaptive != null) adaptive.choose(previous, original, chosen, knownWord(chosen));
+        if (touchEnabled && touchModel != null) touchModel.learn(samples, chosen);
+    }
+
+    private boolean knownWord(String word) {
+        int language = word != null && !word.isEmpty() && word.charAt(0) >= 0xac00 ? 1 : 0;
+        BoundarySuggestions dictionary = boundaries[language];
+        return dictionary != null && dictionary.knows(word);
     }
 
     public void setSuggestionStrip(SuggestionStripView strip) {
@@ -307,6 +339,9 @@ public final class AutoCorrectController {
         pendingChosenSpace = null;
         finishManualTyping(korean);
         invalidateBoundary();
+        if (word == null) taps.clear();
+        if (pendingTap != null && taps.size() < 64) taps.add(pendingTap);
+        pendingTap = null;
         trackLiteralTyping(korean);
         if (!emailOnly) updateWordAfterTyping(korean);
         refreshLiteralSuggestions();
@@ -381,6 +416,8 @@ public final class AutoCorrectController {
         chosenWord = null;
         pendingChosenSpace = null;
         finishManualBackspace(korean);
+        if (!taps.isEmpty()) taps.remove(taps.size() - 1);
+        pendingTap = null;
         invalidateBoundary();
         trackLiteralBackspace(korean);
         if (!emailOnly) updateWordAfterBackspace(korean);
@@ -443,9 +480,11 @@ public final class AutoCorrectController {
             clearWord(); blocked = false; blockedSelection = null; invalidateBoundary(); return false;
         }
         String original = word, suffix = punctuation;
+        List<TouchModel.Sample> committedTaps = new ArrayList<>(taps);
         String previousContext = precedingText(text.before, original + suffix);
         boolean language = korean;
         boolean protectedWord = wordProtected || isPersonalWord(original);
+        boolean observed = !autoCorrectionEnabled && learningEnabled && adaptive != null;
         int version = dictionaryVersion();
         long token = ++generation;
         cancelQueuedSuggestions();
@@ -460,17 +499,21 @@ public final class AutoCorrectController {
         if (!inserted) return false;
         ContextText after = readContext(connection);
         if (after == null || !after.before.endsWith(original + suffix + " ")) return true;
+        if (observed) { adaptive.observe(previousContext, original, false, knownWord(original)); version = dictionaryVersion(); }
         Boundary next = new Boundary(connection, original, suffix, previousContext, language, protectedWord,
                 after.selection, version, token);
         boundary = next;
+        next.taps = committedTaps;
+        next.observed = observed;
         next.pending = version != Integer.MIN_VALUE;
         // Manual suggestions cannot rewrite the editor, so typing need not wait for their search.
         busy = next.pending && autoCorrectionEnabled;
         showBoundaryCandidates(next);
         if (!next.pending) return true;
+        final int searchVersion = version;
         try {
             worker.execute(() -> {
-                TypingCorrector.Result result = compute(original, language, version, previousContext, false);
+                TypingCorrector.Result result = compute(original, language, searchVersion, previousContext, false, committedTaps);
                 main.post(() -> finishBoundary(next, token, result));
             });
         } catch (RejectedExecutionException e) {
@@ -486,7 +529,9 @@ public final class AutoCorrectController {
     public boolean undoCorrection() {
         Boundary current = boundary;
         if (closed || busy || current == null || !current.automatic || !validBoundary(current)) return false;
+        String rejected = current.output;
         if (!replaceBoundary(current, current.original)) return false;
+        if (learningEnabled && adaptive != null) adaptive.reject(current.original, rejected);
         current.automatic = false;
         current.token = ++generation;
         current.predictions = Collections.emptyList();
@@ -566,7 +611,7 @@ public final class AutoCorrectController {
         ContextText text = readContext(wordConnection);
         if (!validTrackedText(text)) return;
         String previousContext = precedingText(text.before, word + punctuation);
-        Request request = new Request(wordConnection, word, previousContext, korean, version, token);
+        Request request = new Request(wordConnection, word, previousContext, korean, version, token, taps);
         synchronized (requestLock) {
             queuedSuggestion = request;
             if (suggestionScheduled) return;
@@ -960,7 +1005,7 @@ public final class AutoCorrectController {
                 synchronized (requestLock) { request = queuedSuggestion; queuedSuggestion = null; }
                 if (request != null) {
                     TypingCorrector.Result result = compute(request.word, request.korean,
-                            request.version, request.previousContext, true);
+                            request.version, request.previousContext, true, request.taps);
                     main.post(() -> showSuggestions(request, result));
                 }
                 boolean again;
@@ -980,24 +1025,29 @@ public final class AutoCorrectController {
     }
 
     private TypingCorrector.Result compute(String typed, boolean korean, int version,
-                                            String previousContext, boolean completions) {
+                                            String previousContext, boolean completions, List<TouchModel.Sample> samples) {
         try {
             if (dictionaryVersion() != version) return null;
             int language = korean ? 1 : 0;
             if (engines[language] == null || engineVersions[language] != version) {
-                if (!korean) ensureContextModelLoaded();
-                engines[language] = new TypingCorrector(loader.load(korean), korean,
-                        korean ? null : contextModel);
+                TypingCorrector.ContextModel model = effectiveContext(korean);
+                List<SwipeDecoder.Entry> entries = new ArrayList<>(loader.load(korean));
+                if (learningEnabled && adaptive != null) entries.addAll(adaptive.entries(korean));
+                engines[language] = new TypingCorrector(entries, korean, model);
+                boundaries[language] = new BoundarySuggestions(entries);
                 engineVersions[language] = version;
             }
             TypingCorrector.Result result;
             try { result = completions
-                    ? engines[language].suggestWithCompletions(typed, 5, previousContext)
-                    : engines[language].suggest(typed, 5, previousContext); }
+                    ? engines[language].suggestWithCompletions(typed, 12, previousContext)
+                    : engines[language].suggest(typed, 12, previousContext); }
             catch (RuntimeException e) {
                 Log.w(TAG, "Could not use typing context; falling back to spelling", e);
                 result = engines[language].suggest(typed, 5);
             }
+            result = PersonalizedSuggestions.apply(result, typed, previousContext,
+                    learningEnabled ? adaptive : null, touchEnabled ? touchModel : null, samples,
+                    boundaries[language].split(typed, effectiveContext(korean)), 5);
             return dictionaryVersion() == version ? result : null;
         } catch (IOException | RuntimeException e) {
             Log.w(TAG, "Could not load or search the typing dictionary", e);
@@ -1015,8 +1065,18 @@ public final class AutoCorrectController {
         contextModelLoaded = true;
     }
 
+    private TypingCorrector.ContextModel effectiveContext(boolean korean) {
+        if (korean && !koreanContextLoaded) {
+            try { koreanContextModel = loader.loadContext(true); }
+            catch (IOException ignored) { }
+            koreanContextLoaded = true;
+        } else if (!korean) ensureContextModelLoaded();
+        TypingCorrector.ContextModel base = korean ? koreanContextModel : contextModel;
+        return learningEnabled && adaptive != null ? new PersonalContextModel(base, adaptive) : base;
+    }
+
     private int dictionaryVersion() {
-        try { return loader.version(); }
+        try { return adaptationEpoch * 100003 + loader.version() * 31 + (learningEnabled && adaptive != null ? adaptive.lexiconVersion() : 0); }
         catch (RuntimeException e) {
             Log.w(TAG, "Could not read typing dictionary version", e);
             return Integer.MIN_VALUE;
@@ -1064,6 +1124,11 @@ public final class AutoCorrectController {
             // Stale or unavailable dictionaries must not hide an otherwise valid Add action.
             current.version = dictionaryVersion();
         }
+        if (!current.automatic && !current.observed && learningEnabled && adaptive != null) {
+            adaptive.observe(current.previousContext, current.output, false, result != null && result.exactWord);
+            current.observed = true;
+            current.version = dictionaryVersion();
+        }
         showBoundaryCandidates(current);
         requestBoundaryPredictions(current);
         if (validBoundaryLocation(current)) flushDeferred();
@@ -1077,6 +1142,9 @@ public final class AutoCorrectController {
         beforeEdit.run();
         InputConnection connection = wordConnection;
         if (!validTrackedText(readContext(connection))) return;
+        String originalWord = word;
+        String priorContext = precedingText(readContext(connection).before, word + punctuation);
+        List<TouchModel.Sample> confirmedTaps = new ArrayList<>(taps);
         String replace = word + punctuation;
         beforeManualEdit();
         applyingEdit = true;
@@ -1095,6 +1163,7 @@ public final class AutoCorrectController {
         ContextText text = readContext(connection);
         if (text == null) { blockWord(); return; }
         wordSelection = text.selection;
+        confirmChoice(priorContext, originalWord, candidate, confirmedTaps);
         // A manually selected spelling is final for this word, but can still be edited.
         generation++;
         clearSuggestions();
@@ -1140,7 +1209,13 @@ public final class AutoCorrectController {
     private void selectBoundaryCandidate(Boundary current, long token, String candidate) {
         if (closed || boundary != current || token != generation || current.token != token ||
                 candidate == null || !validBoundary(current)) return;
+        String oldOutput = current.output;
+        boolean wasAutomatic = current.automatic;
         if (replaceBoundary(current, candidate)) {
+            if (wasAutomatic && candidate.equals(current.original) && learningEnabled && adaptive != null)
+                adaptive.reject(current.original, oldOutput);
+            else confirmChoice(current.previousContext, current.original, candidate, current.taps);
+            current.version = dictionaryVersion();
             current.automatic = false;
             current.token = ++generation;
             current.predictions = Collections.emptyList();
@@ -1150,7 +1225,7 @@ public final class AutoCorrectController {
     }
 
     private void requestBoundaryPredictions(Boundary current) {
-        if (strip == null || closed || boundary != current || current.pending || current.korean ||
+        if (strip == null || closed || boundary != current || current.pending ||
                 current.version == Integer.MIN_VALUE ||
                 !current.punctuation.isEmpty() || !validBoundary(current)) return;
         final long token = current.token;
@@ -1161,9 +1236,9 @@ public final class AutoCorrectController {
             worker.execute(() -> {
                 List<String> predictions = Collections.emptyList();
                 try {
-                    if (dictionaryVersion() == version) ensureContextModelLoaded();
-                    if (dictionaryVersion() == version && contextModel != null) {
-                        predictions = validPredictions(contextModel.predict(preceding, 5));
+                    TypingCorrector.ContextModel model = effectiveContext(current.korean);
+                    if (dictionaryVersion() == version && model != null) {
+                        predictions = validPredictions(model.predict(preceding, 5), current.korean);
                     }
                 } catch (RuntimeException e) {
                     Log.w(TAG, "Could not predict the next word", e);
@@ -1182,11 +1257,11 @@ public final class AutoCorrectController {
         }
     }
 
-    private static List<String> validPredictions(List<String> predictions) {
+    private static List<String> validPredictions(List<String> predictions, boolean korean) {
         if (predictions == null || predictions.isEmpty()) return Collections.emptyList();
         List<String> result = new ArrayList<>();
         for (String candidate : predictions) {
-            if (candidate != null && validWord(candidate, false) && !result.contains(candidate)) {
+            if (candidate != null && validWord(candidate, korean) && !result.contains(candidate)) {
                 result.add(candidate);
                 if (result.size() == 5) break;
             }
@@ -1223,8 +1298,9 @@ public final class AutoCorrectController {
             clearSuggestions();
             return;
         }
-        Boundary next = new Boundary(connection, candidate, "", preceding, false,
-                isPersonalWord(candidate), after.selection, current.version, nextToken);
+        confirmChoice(preceding, candidate, candidate, Collections.emptyList());
+        Boundary next = new Boundary(connection, candidate, "", preceding, current.korean,
+                isPersonalWord(candidate), after.selection, dictionaryVersion(), nextToken);
         next.typedSpace = false;
         boundary = next;
         showBoundaryCandidates(next);
@@ -1303,6 +1379,8 @@ public final class AutoCorrectController {
     }
 
     private void clearWord() {
+        taps.clear();
+        pendingTap = null;
         word = null; wordConnection = null; wordSelection = null; prefix = null; punctuation = "";
         wordProtected = false;
     }
@@ -1604,7 +1682,16 @@ public final class AutoCorrectController {
             @Override public int version() { return personal.getVersion(); }
             @Override public TypingCorrector.ContextModel loadContext() throws IOException {
                 try (InputStream input = context.getAssets().open("swipe/en_context.tsv")) {
-                    return EnglishContextModel.load(input);
+                    TypingCorrector.ContextModel base = EnglishContextModel.load(input);
+                    try (InputStream phrases = context.getAssets().open("swipe/en_phrases.txt")) {
+                        return new PhraseContextModel(phrases, base);
+                    }
+                }
+            }
+            @Override public TypingCorrector.ContextModel loadContext(boolean korean) throws IOException {
+                if (!korean) return loadContext();
+                try (InputStream phrases = context.getAssets().open("swipe/ko_phrases.txt")) {
+                    return new PhraseContextModel(phrases, null);
                 }
             }
             @Override public List<SwipeDecoder.Entry> load(boolean korean) throws IOException {
@@ -1687,11 +1774,13 @@ public final class AutoCorrectController {
     private static final class Request {
         final InputConnection connection;
         final String word, previousContext;
+        final List<TouchModel.Sample> taps;
         final boolean korean;
         final int version;
         final long token;
         Request(InputConnection connection, String word, String previousContext,
-                boolean korean, int version, long token) {
+                boolean korean, int version, long token, List<TouchModel.Sample> taps) {
+            this.taps = new ArrayList<>(taps);
             this.connection = connection; this.word = word; this.previousContext = previousContext;
             this.korean = korean;
             this.version = version; this.token = token;
@@ -1753,6 +1842,8 @@ public final class AutoCorrectController {
         boolean protectedWord;
         boolean learningFailed;
         boolean typedSpace = true;
+        boolean observed;
+        List<TouchModel.Sample> taps = Collections.emptyList();
         List<String> candidates;
         List<String> predictions = Collections.emptyList();
         Boundary(InputConnection connection, String original, String punctuation, String previousContext,

@@ -43,6 +43,7 @@ public final class SwipeTypingController {
     interface DictionaryLoader {
         List<SwipeDecoder.Entry> load(boolean korean) throws IOException;
         default TypingCorrector.ContextModel loadContext() throws IOException { return null; }
+        default TypingCorrector.ContextModel loadContext(boolean korean) throws IOException { return korean ? null : loadContext(); }
     }
 
     private final ConnectionProvider connections;
@@ -58,6 +59,11 @@ public final class SwipeTypingController {
     private final List<SwipeDecoder.Entry>[] dictionaries;
     private TypingCorrector.ContextModel contextModel;
     private boolean contextModelLoaded;
+    private TypingCorrector.ContextModel koreanContextModel;
+    private AdaptiveTypingModel adaptive;
+    private volatile boolean learningEnabled;
+    private volatile int adaptationEpoch;
+    private String chosenContext, originalSwipe, currentSwipe;
     private final LinkedHashMap<Geometry, SwipeDecoder> decoders =
             new LinkedHashMap<Geometry, SwipeDecoder>(3, 0.75f, true) {
                 @Override protected boolean removeEldestEntry(Map.Entry<Geometry, SwipeDecoder> eldest) {
@@ -82,6 +88,7 @@ public final class SwipeTypingController {
         this(connections, Executors.newSingleThreadExecutor(), null,
                 assetLoader(context.getApplicationContext()), new Handler(Looper.getMainLooper()));
         personalDictionary = new PersonalDictionary(context);
+        adaptive = new AdaptiveTypingModel(context);
     }
 
     // Package-private injection makes ordering, failures and cancellation deterministic in tests.
@@ -105,6 +112,13 @@ public final class SwipeTypingController {
         this.mainHandler = mainHandler;
         this.personalDictionary = personalDictionary;
         dictionaries = (List<SwipeDecoder.Entry>[]) new List<?>[2];
+    }
+
+    public void setLearningEnabled(boolean enabled) {
+        if (learningEnabled == enabled) return;
+        learningEnabled = enabled;
+        adaptationEpoch++;
+        cancel(connections.get());
     }
 
     /** Enables context ranking only where the active editor permits spelling assistance. */
@@ -146,14 +160,15 @@ public final class SwipeTypingController {
         }
         busy = true;
         pendingSelection = readSelection(connection);
-        final String previousContext = contextRankingEnabled && !korean &&
+        final String previousContext = (contextRankingEnabled || learningEnabled) &&
                 pendingSelection != null && pendingSelection.start == pendingSelection.end
                 ? readPreviousContext(connection) : null;
         final long token = ++generation;
         try {
             worker.execute(() -> {
                 List<String> result = Collections.emptyList();
-                int personalVersion = personalDictionary == null ? 0 : personalDictionary.getVersion();
+                String rawWinner = null;
+                int personalVersion = combinedVersion();
                 try {
                     if (dictionaryVersion != personalVersion) {
                         dictionaries[0] = null;
@@ -167,6 +182,7 @@ public final class SwipeTypingController {
                         int language = korean ? 1 : 0;
                         if (dictionaries[language] == null) {
                             dictionaries[language] = new ArrayList<>(loader.load(korean));
+                            if (learningEnabled && adaptive != null) dictionaries[language].addAll(adaptive.entries(korean));
                             if (personalDictionary != null) {
                                 dictionaries[language] = withPersonalWords(dictionaries[language],
                                         personalDictionary.getEntries(korean), korean);
@@ -184,15 +200,42 @@ public final class SwipeTypingController {
                             }
                             contextModelLoaded = true;
                         }
-                        prior = contextPrior(contextModel, previousContext, personalDictionary);
+                        TypingCorrector.ContextModel model = contextModel;
+                        if (korean) {
+                            if (koreanContextModel == null) koreanContextModel = loader.loadContext(true);
+                            model = koreanContextModel;
+                        }
+                        if (learningEnabled && adaptive != null) model = new PersonalContextModel(model, adaptive);
+                        prior = contextPrior(model, previousContext, personalDictionary);
                     }
-                    result = decoder.decode(pathCopy, 5, prior);
+                    result = decoder.decode(pathCopy, 5, contextRankingEnabled ? prior : null);
+                    rawWinner = result.isEmpty() ? null : result.get(0);
+                    if ((personalDictionary == null || !personalDictionary.contains(rawWinner))
+                            && learningEnabled && adaptive != null && result.size() > 1) {
+                        final String original = rawWinner;
+                        boolean hasPreference = false;
+                        for (String candidate : result) if (adaptive.choices(original, candidate) >= 2) hasPreference = true;
+                        if (hasPreference) {
+                            final SwipeDecoder.ContextPrior basePrior = contextRankingEnabled ? prior : null;
+                            result = decoder.decode(pathCopy, 5, new SwipeDecoder.ContextPrior() {
+                                @Override public double bonus(String candidate) {
+                                    double base = basePrior == null ? 0 : basePrior.bonus(candidate);
+                                    return base + (adaptive.choices(original, candidate) >= 2
+                                            && !adaptive.rejected(original, candidate) ? .25 : 0);
+                                }
+                                @Override public boolean isProtected(String candidate) {
+                                    return personalDictionary != null && personalDictionary.contains(candidate);
+                                }
+                            });
+                        }
+                    }
                 } catch (IOException | RuntimeException e) {
                     Log.w(TAG, "Could not decode swipe", e);
                 }
                 final List<String> decoded = result;
+                final String originalWinner = rawWinner;
                 mainHandler.post(() -> {
-                    if (personalDictionary != null && personalDictionary.getVersion() != personalVersion) {
+                    if (combinedVersion() != personalVersion) {
                         if (token == generation) {
                             busy = false;
                             pendingSelection = null;
@@ -202,7 +245,7 @@ public final class SwipeTypingController {
                         return;
                     }
                     onDecoded(token, connection, decoded, korean, capitalize, capsLock,
-                            previousContext);
+                            previousContext, originalWinner);
                 });
             });
         } catch (RejectedExecutionException e) {
@@ -305,7 +348,7 @@ public final class SwipeTypingController {
 
     private void onDecoded(long token, InputConnection connection, List<String> decoded,
                            boolean korean, boolean capitalize, boolean capsLock,
-                           String previousContext) {
+                           String previousContext, String rawWinner) {
         if (closed || token != generation) return;
         busy = false;
         SelectionSnapshot expectedSelection = pendingSelection;
@@ -352,6 +395,9 @@ public final class SwipeTypingController {
             composingConnection = connection;
             compositionId++;
             candidates = display;
+            chosenContext = previousContext;
+            currentSwipe = display.get(0);
+            originalSwipe = rawWinner == null ? currentSwipe : applyCapitalization(rawWinner, korean, capitalize, capsLock);
             hint = DEFAULT_HINT;
         } finally {
             connection.endBatchEdit();
@@ -367,7 +413,20 @@ public final class SwipeTypingController {
         if (id != compositionId || composingConnection == null || connections.get() != composingConnection) return;
         applyingEditorChange = true;
         try {
-            composingConnection.setComposingText(word, 1);
+            SelectionSnapshot actual = readSelection(composingConnection);
+            if (composingSelection != null && !composingSelection.equals(actual)) return;
+            CharSequence before = composingConnection.getTextBeforeCursor(80, 0);
+            CharSequence selected = composingConnection.getSelectedText(0);
+            if (before == null || currentSwipe == null || !before.toString().endsWith(currentSwipe)
+                    || (selected != null && selected.length() > 0)) return;
+            if (!candidates.contains(word) || !composingConnection.setComposingText(word, 1)) return;
+            if (learningEnabled && adaptive != null) {
+                if (word.equals(originalSwipe) && !word.equals(currentSwipe)) {
+                    adaptive.reject(originalSwipe, currentSwipe);
+                    adaptive.observe(chosenContext, word, true, true);
+                } else adaptive.choose(chosenContext, originalSwipe, word, true);
+            }
+            currentSwipe = word;
         } finally {
             applyingEditorChange = false;
         }
@@ -378,7 +437,13 @@ public final class SwipeTypingController {
         while (!closed && !busy && !deferred.isEmpty()) deferred.removeFirst().run();
     }
 
+    private int combinedVersion() {
+        return adaptationEpoch * 100003 + (personalDictionary == null ? 0 : personalDictionary.getVersion()) * 31
+                + (learningEnabled && adaptive != null ? adaptive.lexiconVersion() : 0);
+    }
+
     private void clearComposition() {
+        chosenContext = originalSwipe = currentSwipe = null;
         composingConnection = null;
         composingSelection = null;
         compositionId++;
@@ -502,7 +567,16 @@ public final class SwipeTypingController {
         return new DictionaryLoader() {
             @Override public TypingCorrector.ContextModel loadContext() throws IOException {
                 try (InputStream input = context.getAssets().open("swipe/en_context.tsv")) {
-                    return EnglishContextModel.load(input);
+                    TypingCorrector.ContextModel base = EnglishContextModel.load(input);
+                    try (InputStream phrases = context.getAssets().open("swipe/en_phrases.txt")) {
+                        return new PhraseContextModel(phrases, base);
+                    }
+                }
+            }
+            @Override public TypingCorrector.ContextModel loadContext(boolean korean) throws IOException {
+                if (!korean) return loadContext();
+                try (InputStream phrases = context.getAssets().open("swipe/ko_phrases.txt")) {
+                    return new PhraseContextModel(phrases, null);
                 }
             }
             @Override public List<SwipeDecoder.Entry> load(boolean korean) throws IOException {

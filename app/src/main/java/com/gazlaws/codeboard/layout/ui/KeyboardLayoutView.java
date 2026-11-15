@@ -25,6 +25,17 @@ public class KeyboardLayoutView extends ViewGroup {
     private final float touchSlop;
     private final ArrayList<SwipeGesture.Point> swipePath = new ArrayList<>();
 
+    public interface TapListener {
+        void onTap(char letter, float x, float y, List<SwipeGesture.KeyPosition> keys, int width, int height);
+    }
+    private TapListener tapListener;
+    public void setTapListener(TapListener listener) { tapListener = listener; }
+    void recordTap(KeyboardButtonView button, float x, float y) {
+        if (tapListener != null && !ctrlPressed && button.swipeLetter() != 0)
+            tapListener.onTap(button.swipeLetter(), x + button.getLeft(), y + button.getTop(),
+                    collectKeyPositions(), getWidth(), getHeight());
+    }
+
     private boolean swipeEnabled;
     private boolean ctrlPressed;
     // A per-orientation override is supplied by the IME. Null keeps the theme default.
@@ -207,6 +218,7 @@ public class KeyboardLayoutView extends ViewGroup {
         if (shouldSwipe) {
             listener.onSwipe(path, keys);
         } else if (shouldTap) {
+            recordTap(button, event.getX() - button.getLeft(), event.getY() - button.getTop());
             button.completeDeferredPress();
         }
     }
