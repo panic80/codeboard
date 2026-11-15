@@ -11,7 +11,8 @@ import java.util.PriorityQueue;
 /**
  * An offline, geometry-based word gesture decoder. Instances contain immutable, precomputed
  * dictionary templates and may be reused across gestures and threads. Coordinates in the path
- * and the keyboard must use the same coordinate system.
+ * and the keyboard must use the same coordinate system. Detailed shape matching considers
+ * positions and local travel direction, including short reversals between adjacent keys.
  *
  * <p>For Korean, key labels must be the Latin positions of the two-set keyboard (for example,
  * the key labelled ㅁ is {@code 'a'}). Shifted jamo share the same gesture position as their
@@ -29,6 +30,11 @@ public final class SwipeDecoder {
     private static final int CONTEXT_ENDPOINT_SAMPLES = 4;
     private static final float CONTEXT_INTERIOR_TOLERANCE = 0.45f;
     private static final float CONTEXT_INTERIOR_GAP_SCALE = 40f;
+    private static final float DIRECTION_WEIGHT = 0.40f;
+    private static final float MIN_DIRECTION_LENGTH_SQUARED = 0.0025f;
+    private static final float REPEAT_REGION_DIAMETER = 0.40f;
+    private static final float REPEAT_CENTER_RADIUS = 0.25f;
+    private static final long REPEAT_DWELL_MILLIS = 120;
 
     /** Maximum amount that context can subtract from a candidate's gesture cost. */
     public static final float MAX_CONTEXT_BONUS = 0.55f;
@@ -406,6 +412,7 @@ public final class SwipeDecoder {
 
     private static float dynamicShape(float[] path, float[] template) {
         // Monotone alignment tolerates smoothing and changing speed while preserving key order.
+        // Direction distinguishes a brief reversal from a path merely crossing the same keys.
         float[] previous = new float[SAMPLE_COUNT + 1];
         float[] current = new float[SAMPLE_COUNT + 1];
         for (int j = 0; j <= SAMPLE_COUNT; j++) previous[j] = Float.POSITIVE_INFINITY;
@@ -417,6 +424,7 @@ public final class SwipeDecoder {
             for (int j = from; j <= to; j++) {
                 float cost = distanceSquared(path[2 * (i - 1)], path[2 * (i - 1) + 1],
                         template[2 * (j - 1)], template[2 * (j - 1) + 1]);
+                cost += directionCost(path, i - 1, template, j - 1);
                 current[j] = cost + Math.min(previous[j - 1], Math.min(previous[j], current[j - 1]));
             }
             float[] swap = previous;
@@ -424,6 +432,18 @@ public final class SwipeDecoder {
             current = swap;
         }
         return previous[SAMPLE_COUNT] / SAMPLE_COUNT;
+    }
+
+    private static float directionCost(float[] path, int i, float[] template, int j) {
+        int ia = Math.max(0, i - 1), ib = Math.min(SAMPLE_COUNT - 1, i + 1);
+        int ja = Math.max(0, j - 1), jb = Math.min(SAMPLE_COUNT - 1, j + 1);
+        float px = path[2 * ib] - path[2 * ia], py = path[2 * ib + 1] - path[2 * ia + 1];
+        float tx = template[2 * jb] - template[2 * ja], ty = template[2 * jb + 1] - template[2 * ja + 1];
+        float pl = px * px + py * py, tl = tx * tx + ty * ty;
+        // A nearly stationary or symmetric sample has no reliable direction.
+        if (pl < MIN_DIRECTION_LENGTH_SQUARED || tl < MIN_DIRECTION_LENGTH_SQUARED) return 0;
+        float cosine = (float) ((px * tx + py * ty) / Math.sqrt(pl * tl));
+        return DIRECTION_WEIGHT * Math.max(0, 1 - Math.min(1, cosine));
     }
 
     private static float interiorMismatch(float[] first, float[] second) {
@@ -462,16 +482,51 @@ public final class SwipeDecoder {
     }
 
     private int repeatEvidence(List<Point> path, float[] sampled) {
-        long[] dwell = new long[26];
-        for (int i = 1; i < path.size(); i++) {
-            Point a = path.get(i - 1);
-            Point b = path.get(i);
-            if (a.timeMillis < 0 || b.timeMillis <= a.timeMillis) continue;
-            float ax = a.x / scaleX, ay = a.y / scaleY;
-            float bx = b.x / scaleX, by = b.y / scaleY;
-            if (distanceSquared(ax, ay, bx, by) > 0.25f * 0.25f) continue;
-            int key = nearestKey((ax + bx) / 2, (ay + by) / 2, 0.55f);
-            if (key >= 0) dwell[key] += Math.min(500, b.timeMillis - a.timeMillis);
+        // A pause is time spent in a small region during one visit, not the sum
+        // of time spent crossing a key on separate legs of a gesture. Bounding the
+        // visit also prevents many small, continuous movements from looking like a
+        // pause merely because individual samples are close together.
+        int dwellKeys = 0;
+        int regionKey = -1, centerKey = -1;
+        float minX = 0, minY = 0, maxX = 0, maxY = 0;
+        long regionStart = -1, centerStart = -1, previousTime = -1;
+        for (Point point : path) {
+            float x = point.x / scaleX, y = point.y / scaleY;
+            int key = nearestKey(x, y, 0.55f);
+            if (point.timeMillis < 0 || key < 0) {
+                regionKey = -1;
+                centerKey = -1;
+                previousTime = -1;
+                continue;
+            }
+            boolean timeReversed = point.timeMillis < previousTime;
+            float nextMinX = Math.min(minX, x), nextMinY = Math.min(minY, y);
+            float nextMaxX = Math.max(maxX, x), nextMaxY = Math.max(maxY, y);
+            float width = nextMaxX - nextMinX, height = nextMaxY - nextMinY;
+            if (key != regionKey || timeReversed
+                    || width * width + height * height
+                    > REPEAT_REGION_DIAMETER * REPEAT_REGION_DIAMETER) {
+                regionKey = key;
+                minX = maxX = x;
+                minY = maxY = y;
+                regionStart = point.timeMillis;
+            } else {
+                minX = nextMinX; minY = nextMinY; maxX = nextMaxX; maxY = nextMaxY;
+                if (point.timeMillis - regionStart >= REPEAT_DWELL_MILLIS) dwellKeys |= 1 << key;
+            }
+            // A finger can also jitter around the center of a key while holding
+            // it. Treat remaining in this smaller key-centered area as one dwell,
+            // even if it has crossed the bounding region's boundary.
+            if (distanceSquared(x, y, keyX[key], keyY[key])
+                    > REPEAT_CENTER_RADIUS * REPEAT_CENTER_RADIUS) {
+                centerKey = -1;
+            } else if (key != centerKey || timeReversed) {
+                centerKey = key;
+                centerStart = point.timeMillis;
+            } else if (point.timeMillis - centerStart >= REPEAT_DWELL_MILLIS) {
+                dwellKeys |= 1 << key;
+            }
+            previousTime = point.timeMillis;
         }
         // Detect a genuine loop, rather than adding together ordinary passes near a key.
         // A gesture often crosses the same key more than once on its way to other letters.
@@ -491,11 +546,7 @@ public final class SwipeDecoder {
             }
             previousKey = key;
         }
-        int result = loopKeys;
-        for (int key = 0; key < 26; key++) {
-            if (dwell[key] >= 120) result |= 1 << key;
-        }
-        return result;
+        return loopKeys | dwellKeys;
     }
 
     private int nearestKey(float x, float y, float radius) {

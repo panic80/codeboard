@@ -8,6 +8,11 @@ import com.gazlaws.codeboard.input.KoreanKeyMap;
 
 import org.junit.Test;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -42,6 +47,91 @@ public class SwipeDecoderTest {
         SwipeDecoder decoder = new SwipeDecoder(keys, entries("test", 10, "text", 1000, "tent", 1000));
         assertEquals("test", decoder.decode(pathFor(keys, "test"), 3).get(0));
         assertEquals("text", decoder.decode(pathFor(keys, "text"), 3).get(0));
+    }
+
+    @Test public void slowStrikeKeepsItsOrderWithTheBundledDictionaryAndContext() throws Exception {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder decoder = new SwipeDecoder(keys, bundledDictionary());
+        EnglishContextModel context;
+        try (FileInputStream input = new FileInputStream(assetFile("en_context.tsv"))) {
+            context = EnglishContextModel.load(input);
+        }
+        EnglishContextModel.PreparedContext afterTried = context.prepare("tried ");
+        EnglishContextModel.PreparedContext afterThe = context.prepare("the ");
+        SwipeDecoder.ContextPrior tried = bundledPrior(afterTried);
+        SwipeDecoder.ContextPrior the = bundledPrior(afterThe);
+
+        List<Point> exact = pathFor(keys, "strike");
+        List<Point> noisy = Arrays.asList(
+                new Point(1.71f, 1.09f), new Point(4.06f, -0.25f),
+                new Point(3.20f, 0.10f), new Point(6.75f, 0.12f),
+                new Point(7.74f, 1.10f), new Point(1.90f, -0.20f));
+        for (float spacing : new float[] {0.05f, 0.10f, 0.20f}) {
+            for (List<Point> vertices : Arrays.asList(exact, roundedPath(noisy, 0.15f))) {
+                List<Point> path = timedPolyline(vertices, 80, spacing);
+                assertEquals("strike", decoder.decode(path, 5).get(0));
+                assertEquals("strike", decoder.decode(path, 5, tried).get(0));
+                assertEquals("strike", decoder.decode(path, 5, the).get(0));
+            }
+            // A slower turn at O should not be mistaken for a double O either.
+            for (int speed : new int[] {80, 120, 160, 200}) {
+                List<Point> store = timedPolyline(pathFor(keys, "store"), speed, spacing);
+                assertEquals("store", decoder.decode(store, 5).get(0));
+            }
+        }
+    }
+
+    @Test public void continuousMovementAcrossAndBackThroughKeysIsNotADoubleLetterPause() {
+        List<KeyPosition> keys = qwerty();
+        // Doubling a key does not change its geometric template. This isolates
+        // repeat evidence from all other scores, including the frequency prior.
+        for (String repeated : Arrays.asList("sttrike", "strrike")) {
+            SwipeDecoder decoder = new SwipeDecoder(keys, entries("strike", 100, repeated, 100));
+            for (int millisPerKey : new int[] {40, 80, 120, 160}) {
+                for (float spacing : new float[] {0.05f, 0.10f, 0.20f}) {
+                    List<Point> path = timedPolyline(pathFor(keys, "strike"), millisPerKey, spacing);
+                    assertEquals(repeated + " " + millisPerKey + " " + spacing,
+                            "strike", decoder.decode(path, 2).get(0));
+                }
+            }
+        }
+
+        // This pair also has identical geometry, but here the path simply turns
+        // once at T rather than crossing it again on later legs.
+        SwipeDecoder slowTurn = new SwipeDecoder(keys, entries("later", 100, "latter", 100));
+        assertEquals("later", slowTurn.decode(
+                timedPolyline(pathFor(keys, "later"), 160, 0.10f), 2).get(0));
+    }
+
+    @Test public void noisyShortReversalsRemainDistinctFromShorterWordPaths() throws Exception {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder decoder = new SwipeDecoder(keys, bundledDictionary());
+        EnglishContextModel context;
+        try (FileInputStream input = new FileInputStream(assetFile("en_context.tsv"))) {
+            context = EnglishContextModel.load(input);
+        }
+        // Every turn is inside its intended key, but several are near key edges.
+        // In particular, T -> R reverses direction before the long leg to I.
+        List<Point> noisyStrike = Arrays.asList(
+                new Point(1.8242f, 0.8901f), new Point(4.4107f, 0.3171f),
+                new Point(3.1053f, 0.4355f), new Point(6.5812f, 0.2777f),
+                new Point(7.1881f, 0.5565f), new Point(2.4003f, -0.1679f));
+        List<Point> strike = timedPolyline(noisyStrike, 80, 0.10f);
+        assertEquals("strike", decoder.decode(strike, 5).get(0));
+        assertEquals("strike", decoder.decode(strike, 5, bundledPrior(context.prepare("tried "))).get(0));
+        assertEquals("strike", decoder.decode(strike, 5, bundledPrior(context.prepare("a "))).get(0));
+
+        List<Point> site = timedPolyline(pathFor(keys, "site"), 80, 0.10f);
+        assertEquals("site", decoder.decode(site, 5).get(0));
+        List<Point> sitter = timedPolyline(pathFor(keys, "sit"), 80, 0.10f);
+        Point turn = sitter.get(sitter.size() - 1);
+        sitter.add(new Point(turn.x, turn.y, turn.timeMillis + 160));
+        List<Point> tail = timedPolyline(pathFor(keys, "ter"), 80, 0.10f);
+        for (int i = 1; i < tail.size(); i++) {
+            Point point = tail.get(i);
+            sitter.add(new Point(point.x, point.y, turn.timeMillis + 160 + point.timeMillis));
+        }
+        assertEquals("sitter", decoder.decode(sitter, 5).get(0));
     }
 
     @Test public void contextCanResolveAmbiguousNeighboringStartKeys() {
@@ -205,6 +295,56 @@ public class SwipeDecoderTest {
         assertEquals("hello", decoder.decode(withPause, 2).get(0));
     }
 
+    @Test public void repeatedLetterPauseMustBeContinuousAndUseMonotonicTime() {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries("helo", 100, "hello", 100));
+        Map<Character, KeyPosition> lookup = byKey(keys);
+        KeyPosition l = lookup.get('l');
+        List<Point> shortPause = Arrays.asList(timed(lookup.get('h'), 0),
+                timed(lookup.get('e'), 100), timed(l, 300), timed(l, 419),
+                timed(lookup.get('o'), 700));
+        List<Point> fullPause = Arrays.asList(timed(lookup.get('h'), 0),
+                timed(lookup.get('e'), 100), timed(l, 300), timed(l, 420),
+                timed(lookup.get('o'), 700));
+        List<Point> jitteredPause = Arrays.asList(timed(lookup.get('h'), 0),
+                timed(lookup.get('e'), 100), timed(l, 300),
+                new Point(l.centerX + 0.12f, l.centerY, 360),
+                new Point(l.centerX - 0.10f, l.centerY, 420), timed(lookup.get('o'), 700));
+        List<Point> separateVisits = Arrays.asList(timed(lookup.get('h'), 0),
+                timed(lookup.get('e'), 100), timed(l, 300), timed(l, 370),
+                timed(lookup.get('y'), 400), timed(l, 500), timed(l, 570),
+                timed(lookup.get('o'), 700));
+        List<Point> backwards = Arrays.asList(timed(lookup.get('h'), 0),
+                timed(lookup.get('e'), 100), timed(l, 300), timed(l, 390),
+                timed(l, 20), timed(l, 80), timed(lookup.get('o'), 700));
+        List<Point> missing = Arrays.asList(timed(lookup.get('h'), 0),
+                timed(lookup.get('e'), 100), timed(l, 300), timed(l, 390),
+                timed(l, -1), timed(l, 400), timed(l, 460), timed(lookup.get('o'), 700));
+
+        for (List<Point> path : Arrays.asList(shortPause, separateVisits, backwards, missing)) {
+            assertEquals("helo", decoder.decode(path, 2).get(0));
+        }
+        assertEquals("hello", decoder.decode(fullPause, 2).get(0));
+        assertEquals("hello", decoder.decode(jitteredPause, 2).get(0));
+    }
+
+    @Test public void repeatedLetterPauseCanJitterAroundOrNearTheKeyCenter() {
+        List<KeyPosition> keys = qwerty();
+        SwipeDecoder decoder = new SwipeDecoder(keys, entries("fed", 100, "feed", 100));
+        Map<Character, KeyPosition> lookup = byKey(keys);
+        KeyPosition e = lookup.get('e');
+        for (float bias : new float[] {0f, 0.10f, 0.20f}) {
+            List<Point> path = timedPolyline(pathFor(keys, "fe"), 80, 0.10f);
+            long start = path.get(path.size() - 1).timeMillis;
+            for (int ms = 10; ms <= 160; ms += 10) {
+                float jitter = (float) (0.20 * Math.sin(2 * Math.PI * ms / 100));
+                path.add(new Point(e.centerX + bias + jitter, e.centerY, start + ms));
+            }
+            path.add(timed(lookup.get('d'), start + 300));
+            assertEquals("bias " + bias, "feed", decoder.decode(path, 2).get(0));
+        }
+    }
+
     @Test public void aSmallLoopCanIndicateARepeatedLetter() {
         List<KeyPosition> keys = qwerty();
         SwipeDecoder decoder = new SwipeDecoder(keys, entries("helo", 100, "hello", 100));
@@ -297,6 +437,31 @@ public class SwipeDecoderTest {
         return SwipeDecoder.MAX_CONTEXT_BONUS * Math.min(1, Math.log1p(count) / Math.log1p(10000));
     }
 
+    private static SwipeDecoder.ContextPrior bundledPrior(EnglishContextModel.PreparedContext prepared) {
+        return candidate -> {
+            TypingCorrector.ContextEvidence evidence = prepared.score(candidate);
+            return contextBonus(Math.max(evidence.bigramCount, evidence.trigramCount));
+        };
+    }
+
+    private static File assetFile(String name) {
+        File file = new File("src/main/assets/swipe/" + name);
+        return file.isFile() ? file : new File("app/src/main/assets/swipe/" + name);
+    }
+
+    private static List<Entry> bundledDictionary() throws Exception {
+        List<Entry> entries = new ArrayList<>();
+        try (BufferedReader input = new BufferedReader(new InputStreamReader(
+                new FileInputStream(assetFile("en.tsv")), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = input.readLine()) != null) {
+                String[] fields = line.split("\\t", 2);
+                entries.add(new Entry(fields[0], Integer.parseInt(fields[1])));
+            }
+        }
+        return entries;
+    }
+
     private static void assertContextKeepsClearShapes(List<KeyPosition> keys, String intended,
                                                        int intendedFrequency, String alternative,
                                                        int alternativeFrequency, long contextCount) {
@@ -332,6 +497,40 @@ public class SwipeDecoderTest {
         Map<Character, KeyPosition> lookup = byKey(keys);
         List<Point> result = new ArrayList<>();
         for (char c : sequence.toLowerCase().toCharArray()) result.add(point(lookup.get(c)));
+        return result;
+    }
+
+    private static List<Point> roundedPath(List<Point> vertices, float fraction) {
+        List<Point> result = new ArrayList<>();
+        result.add(vertices.get(0));
+        for (int i = 1; i < vertices.size() - 1; i++) {
+            Point previous = vertices.get(i - 1), current = vertices.get(i), next = vertices.get(i + 1);
+            result.add(new Point(current.x + fraction * (previous.x - current.x),
+                    current.y + fraction * (previous.y - current.y)));
+            result.add(new Point(current.x + fraction * (next.x - current.x),
+                    current.y + fraction * (next.y - current.y)));
+        }
+        result.add(vertices.get(vertices.size() - 1));
+        return result;
+    }
+
+    private static List<Point> timedPolyline(List<Point> vertices, int millisPerKey, float spacing) {
+        List<Point> result = new ArrayList<>();
+        Point first = vertices.get(0);
+        result.add(new Point(first.x, first.y, 0));
+        double elapsed = 0;
+        for (int i = 1; i < vertices.size(); i++) {
+            Point a = vertices.get(i - 1), b = vertices.get(i);
+            double distance = Math.hypot(b.x - a.x, b.y - a.y);
+            int steps = Math.max(1, (int) Math.ceil(distance / spacing));
+            for (int step = 1; step <= steps; step++) {
+                float fraction = (float) step / steps;
+                result.add(new Point(a.x + (b.x - a.x) * fraction,
+                        a.y + (b.y - a.y) * fraction,
+                        Math.round(elapsed + distance * millisPerKey * fraction)));
+            }
+            elapsed += distance * millisPerKey;
+        }
         return result;
     }
 

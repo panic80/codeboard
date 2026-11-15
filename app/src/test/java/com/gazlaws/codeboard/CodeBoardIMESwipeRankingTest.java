@@ -62,6 +62,10 @@ public class CodeBoardIMESwipeRankingTest {
             {-.0200f, .0710f}, {-.0902f, -.0669f}, {.0239f, .0960f},
             {.1381f, .1067f}, {-.0827f, .1339f}
     };
+    private static final float[][] NOISY_STRIKE = {
+            {.3242f, -.1099f}, {.4107f, .3171f}, {.1053f, .4355f},
+            {-.4188f, .2777f}, {-.3119f, -.4435f}, {.4003f, -.1679f}
+    };
 
     private Fixture fixture;
 
@@ -154,6 +158,73 @@ public class CodeBoardIMESwipeRankingTest {
         for (char c : "this ".toCharArray()) f.tap(c);
         f.drainWorkers();
         assertEquals("the this ", f.text());
+    }
+
+    @Test public void slowStrikeGestureKeepsItsTurnsAcrossKeyboardSizesAndContexts()
+            throws Exception {
+        for (int[] size : new int[][] {{650, 240}, {1000, 400}, {1400, 300}}) {
+            for (String context : new String[] {"tried ", "a ", "the ", "to "}) {
+                // A device can deliver the same samples separately or as MotionEvent history.
+                for (boolean batched : new boolean[] {false, true}) {
+                    Fixture f = start(false, true, size[0], size[1]);
+                    f.seed(context);
+                    f.swipeContinuously("strike", batched, false);
+                    f.awaitComposition();
+                    assertEquals("Keyboard " + size[0] + "x" + size[1]
+                                    + ", context=" + context + ", batched=" + batched,
+                            context + "strike", f.text());
+                }
+            }
+        }
+    }
+
+    @Test public void sitterGestureWithRepeatDwellStillWins() throws Exception {
+        for (String context : new String[] {"tried ", "a "}) {
+            for (boolean batched : new boolean[] {false, true}) {
+                Fixture f = start(false, true, 1000, 400);
+                f.seed(context);
+                f.swipeContinuously("sitter", batched, true);
+                f.awaitComposition();
+                assertEquals(context + "sitter", f.text());
+            }
+        }
+    }
+
+    @Test public void noisyStrikeGesturePreservesDirectionAcrossKeyboardSizes() throws Exception {
+        // These points lie within the intended keys; v32 returned "sirree" for this path.
+        for (int[] size : new int[][] {{650, 240}, {1000, 400}, {1400, 300}}) {
+            for (String context : new String[] {"tried ", "a "}) {
+                for (boolean batched : new boolean[] {false, true}) {
+                    Fixture f = start(false, true, size[0], size[1]);
+                    f.seed(context);
+                    f.swipeContinuously("strike", NOISY_STRIKE, batched, false);
+                    f.awaitComposition();
+                    assertEquals("Keyboard " + size[0] + "x" + size[1]
+                                    + ", context=" + context + ", batched=" + batched,
+                            context + "strike", f.text());
+                }
+            }
+        }
+    }
+
+    @Test public void siteGestureStillWins() throws Exception {
+        for (String context : new String[] {"tried ", "a "}) {
+            Fixture f = start(false, true, 1000, 400);
+            f.seed(context);
+            f.swipeContinuously("site", true, false);
+            f.awaitComposition();
+            assertEquals(context + "site", f.text());
+        }
+    }
+
+    @Test public void typedStrikeRemainsStrikeInNaturalContexts() throws Exception {
+        for (String context : new String[] {"tried ", "a ", "the ", "to "}) {
+            Fixture f = start(false, true, 1000, 400);
+            f.seed(context);
+            for (char c : "strike ".toCharArray()) f.tap(c);
+            f.drainWorkers();
+            assertEquals(context + "strike ", f.text());
+        }
     }
 
     @Test public void shiftStillCapitalizesASwipe() throws Exception {
@@ -251,6 +322,62 @@ public class CodeBoardIMESwipeRankingTest {
             send(MotionEvent.ACTION_UP, down, time,
                     (last.getLeft() + last.getRight()) / 2f + dx * last.getWidth(),
                     (last.getTop() + last.getBottom()) / 2f + dy * last.getHeight());
+            time += 100;
+        }
+
+        // Continuous motion at approximately 80 ms per key width, including every turn.
+        void swipeContinuously(String sequence, boolean batched, boolean repeatDwell)
+                throws Exception {
+            swipeContinuously(sequence, null, batched, repeatDwell);
+        }
+
+        void swipeContinuously(String sequence, float[][] offsets, boolean batched,
+                               boolean repeatDwell) throws Exception {
+            long down = time;
+            View first = letter(sequence.charAt(0));
+            float x = (first.getLeft() + first.getRight()) / 2f
+                    + (offsets == null ? 0 : offsets[0][0] * first.getWidth());
+            float y = (first.getTop() + first.getBottom()) / 2f
+                    + (offsets == null ? 0 : offsets[0][1] * first.getHeight());
+            send(MotionEvent.ACTION_DOWN, down, time, x, y);
+            for (int i = 1; i < sequence.length(); i++) {
+                View target = letter(sequence.charAt(i));
+                float targetX = (target.getLeft() + target.getRight()) / 2f
+                        + (offsets == null ? 0 : offsets[i][0] * target.getWidth());
+                float targetY = (target.getTop() + target.getBottom()) / 2f
+                        + (offsets == null ? 0 : offsets[i][1] * target.getHeight());
+                int steps = Math.max(1, (int) Math.ceil(10 * Math.hypot(
+                        (targetX - x) / target.getWidth(),
+                        (targetY - y) / target.getHeight())));
+                MotionEvent move = null;
+                for (int step = 1; step <= steps; step++) {
+                    time += 8;
+                    float sampleX = x + (targetX - x) * step / steps;
+                    float sampleY = y + (targetY - y) * step / steps;
+                    if (!batched) {
+                        send(MotionEvent.ACTION_MOVE, down, time, sampleX, sampleY);
+                    } else if (move == null) {
+                        move = MotionEvent.obtain(down, time, MotionEvent.ACTION_MOVE,
+                                sampleX, sampleY, 0);
+                    } else {
+                        move.addBatch(time, sampleX, sampleY, 1, 1, 0);
+                    }
+                }
+                if (move != null) {
+                    assertTrue("touch not handled", keyboard.dispatchTouchEvent(move));
+                    move.recycle();
+                }
+                x = targetX;
+                y = targetY;
+                if (repeatDwell && sequence.charAt(i) == 't') {
+                    for (int dwell = 0; dwell < 10; dwell++) {
+                        time += 20;
+                        send(MotionEvent.ACTION_MOVE, down, time, x, y);
+                    }
+                }
+            }
+            time += 10;
+            send(MotionEvent.ACTION_UP, down, time, x, y);
             time += 100;
         }
 
