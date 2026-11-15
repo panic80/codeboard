@@ -101,12 +101,85 @@ public class CodeBoardIMEContextCorrectionTest {
     }
 
     @Test public void strongerSettingKeepsOrdinaryUsesOfKnownWords() throws Exception {
-        for (String phrase : new String[]{"the bot ", "chat bot ", "is hot "}) {
+        for (String phrase : new String[]{"the bot ", "chat bot ", "is hot ",
+                "to eat ", "to beat ", "to heat ", "I want too much ", "on them ",
+                "you gave ", "to bed ", "to hell ", "by then "}) {
             Fixture f = start(InputType.TYPE_CLASS_TEXT, true);
             f.type(phrase);
             f.drainWorkers();
             assertEquals(phrase, f.text());
         }
+    }
+
+    @Test public void commonKnownWordCorrectsAndBackspaceRestoresTheTypedWord() throws Exception {
+        Fixture f = start(InputType.TYPE_CLASS_TEXT, true);
+        f.type("in they ");
+        f.drainWorkers();
+        assertEquals("in the ", f.text());
+        f.tap(-5);
+        assertEquals("in they ", f.text());
+        f.tap(-5);
+        assertEquals("in they", f.text());
+    }
+
+    @Test public void continuousTypingAfterKnownWordCorrectionKeepsInputInOrder() throws Exception {
+        Fixture f = start(InputType.TYPE_CLASS_TEXT, true);
+        // These key events arrive while preceding space boundaries may still be resolving.
+        f.type("in they box ");
+        f.drainWorkers();
+        assertEquals("in the box ", f.text());
+    }
+
+    @Test public void uncertainKnownWordOffersManualAlternativeWithoutReplacingIt() throws Exception {
+        Fixture f = start(InputType.TYPE_CLASS_TEXT, true);
+        // The bundled context has only weak evidence for "will meet".
+        f.type("I will meat ");
+        f.drainWorkers();
+        assertEquals("I will meat ", f.text());
+        TextView alternative = f.candidate("meet");
+        assertNotNull("meet should be available as a manual alternative", alternative);
+        assertTrue(alternative.performClick());
+        assertEquals("I will meet ", f.text());
+    }
+
+    @Test public void conservativeSettingKeepsCommonKnownWordButOffersAlternatives() throws Exception {
+        Fixture f = start(InputType.TYPE_CLASS_TEXT, false);
+        f.type("in they ");
+        f.drainWorkers();
+        assertEquals("in they ", f.text());
+        TextView alternative = f.candidate("the");
+        assertNotNull("the should remain selectable", alternative);
+        assertTrue(alternative.performClick());
+        assertEquals("in the ", f.text());
+    }
+
+    @Test public void automaticCorrectionOffKeepsKnownWordAndAllowsManualAlternatives() throws Exception {
+        Fixture f = start(InputType.TYPE_CLASS_TEXT, true, false);
+        f.type("in they ");
+        f.drainWorkers();
+        assertEquals("in they ", f.text());
+        TextView alternative = f.candidate("the");
+        assertNotNull("the should remain selectable", alternative);
+        assertTrue(alternative.performClick());
+        assertEquals("in the ", f.text());
+    }
+
+    @Test public void savedCommonWordIsNotContextuallyReplaced() throws Exception {
+        assertTrue(new PersonalDictionary(context).addWord("they"));
+        Fixture f = start(InputType.TYPE_CLASS_TEXT, true);
+        f.type("in they ");
+        f.drainWorkers();
+        assertEquals("in they ", f.text());
+    }
+
+    @Test public void explicitlyChosenCommonWordIsNotContextuallyReplaced() throws Exception {
+        Fixture f = start(InputType.TYPE_CLASS_TEXT, true);
+        f.type("in they");
+        f.await(() -> f.text().equals("in they") && f.candidate("they") != null);
+        assertTrue(f.candidate("they").performClick());
+        f.tap(' ');
+        f.drainWorkers();
+        assertEquals("in they ", f.text());
     }
 
     @Test public void savedPersonalWordIsNotContextuallyReplaced() throws Exception {
@@ -150,8 +223,12 @@ public class CodeBoardIMEContextCorrectionTest {
     }
 
     private Fixture start(int inputType, boolean strongerCorrection) {
+        return start(inputType, strongerCorrection, true);
+    }
+
+    private Fixture start(int inputType, boolean strongerCorrection, boolean autoCorrection) {
         if (fixture != null) fixture.service.destroy();
-        fixture = new Fixture(context, inputType, strongerCorrection);
+        fixture = new Fixture(context, inputType, strongerCorrection, autoCorrection);
         return fixture;
     }
 
@@ -168,9 +245,9 @@ public class CodeBoardIMEContextCorrectionTest {
         final SuggestionStripView strip;
         long time = 100;
 
-        Fixture(Context context, int inputType, boolean strongerCorrection) {
+        Fixture(Context context, int inputType, boolean strongerCorrection, boolean autoCorrection) {
             PreferenceManager.getDefaultSharedPreferences(context).edit().clear()
-                    .putBoolean("swipe_typing", true).putBoolean("auto_correction", true)
+                    .putBoolean("swipe_typing", true).putBoolean("auto_correction", autoCorrection)
                     .putBoolean("spelling_suggestions", true)
                     .putBoolean("use_top_suggestion", strongerCorrection)
                     .putBoolean("auto_capitalization", false).putBoolean("double_space_period", false)

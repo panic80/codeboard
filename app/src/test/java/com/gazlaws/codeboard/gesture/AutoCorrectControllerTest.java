@@ -1133,6 +1133,57 @@ public class AutoCorrectControllerTest {
         assertEquals("is bot ", text());
     }
 
+    @Test public void manualContextAlternativeWorksWhenAutomaticCorrectionIsOff() {
+        installContextFixture();
+        controller.setUseTopSuggestion(true);
+        controller.setAutoCorrectionEnabled(false);
+        setText("is ");
+        type("bot");
+        assertTrue(controller.commitSpace());
+        assertFalse(controller.deferIfBusy(null));
+        drain();
+        assertEquals("is bot ", text());
+        int alternative = candidateIndex("not");
+        assertTrue("the contextual alternative must be selectable", alternative >= 0);
+        click(alternative);
+        assertEquals("is not ", text());
+        assertFalse(controller.undoCorrection()); // The replacement was a deliberate choice.
+    }
+
+    @Test public void weakContextOffersAnAlternativeButDoesNotReplaceTheTypedWord() {
+        loader.entries.add(new SwipeDecoder.Entry("meat", 33050));
+        loader.entries.add(new SwipeDecoder.Entry("meet", 247466));
+        loader.contextModel = new TypingCorrector.ContextModel() {
+            @Override public TypingCorrector.ContextEvidence score(String previous, String candidate) {
+                return new TypingCorrector.ContextEvidence(
+                        previous.endsWith("will ") && candidate.equals("meet") ? 224 : 0, 0);
+            }
+            @Override public long bigramOmittedUpperBound() { return 210; }
+            @Override public long trigramOmittedUpperBound() { return 130; }
+        };
+        controller.setUseTopSuggestion(true);
+        setText("I will ");
+        type("meat");
+        assertTrue(controller.commitSpace());
+        drain();
+        assertEquals("I will meat ", text());
+        int alternative = candidateIndex("meet");
+        assertTrue("meet must be offered for a deliberate choice", alternative >= 0);
+        click(alternative);
+        assertEquals("I will meet ", text());
+    }
+
+    @Test public void queuedInputRemainsInOrderAfterKnownWordCorrection() {
+        installContextFixture();
+        controller.setUseTopSuggestion(true);
+        setText("is ");
+        type("bot");
+        assertTrue(controller.commitSpace());
+        assertTrue(controller.deferIfBusy(() -> type("fine")));
+        drain();
+        assertEquals("is not fine", text());
+    }
+
     @Test public void changingOnlyTheContextDuringSpaceSearchRejectsTheOldResult() {
         installContextFixture();
         controller.setUseTopSuggestion(true);
@@ -1224,6 +1275,12 @@ public class AutoCorrectControllerTest {
     private String text() { return editor.getText().toString(); }
     private TextView candidateView(int index) { return strip.getCandidateView(index); }
     private String candidate(int index) { return candidateView(index).getText().toString(); }
+    private int candidateIndex(String expected) {
+        for (int i = 0; i < strip.getCandidateCount(); i++) {
+            if (expected.equals(candidate(i))) return i;
+        }
+        return -1;
+    }
     private void click(int index) { candidateView(index).performClick(); }
 
     private View learningAction() { return strip.findViewById(R.id.inline_learning_action); }

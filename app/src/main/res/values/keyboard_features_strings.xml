@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="use_top_suggestion_title">Use most likely suggestion</string>
-    <string name="use_top_suggestion_summary">On Space, use the top spelling match. Turn off for conservative autocorrect.</string>
+    <string name="use_top_suggestion_summary">On Space, use the best spelling match and clearly better English contextual corrections. Turn off for conservative autocorrect.</string>
     <string name="auto_capitalization_title">Automatic capitalization</string>
     <string name="auto_capitalization_summary">Capitalize English sentences in ordinary text fields</string>
     <string name="double_space_period_title">Double-space period</string>

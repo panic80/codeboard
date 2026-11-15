@@ -198,7 +198,7 @@ public class TypingCorrectorTest {
         assertEquals(missingLetter.candidates.get(1), missingLetter.bestSuggestion);
     }
 
-    @Test public void rareExactWordNeedsStrongAdjacentKeyAndContextEvidence() {
+    @Test public void exactWordCanUseStrongContextWhileKeepingOtherSuggestions() {
         Counts counts = new Counts();
         counts.put("autocorrect is ", "not", 10282, 0);
         counts.put("the ", "bot", 1000, 0);
@@ -208,7 +208,7 @@ public class TypingCorrectorTest {
 
         TypingCorrector.Result result = english.suggest("bot", 5, "autocorrect is ");
         assertTrue(result.exactWord);
-        assertEquals(Arrays.asList("bot", "not"), result.candidates);
+        assertEquals(Arrays.asList("bot", "not", "hot", "pot"), result.candidates);
         assertEquals("not", result.contextCorrection);
         assertNull(result.correction);
         assertNull(result.bestSuggestion);
@@ -221,6 +221,61 @@ public class TypingCorrectorTest {
         assertNull(english.suggest("BOT", 5, "autocorrect is ").contextCorrection);
         assertNull(english.suggest("bOt", 5, "autocorrect is ").contextCorrection);
         assertNull(english.suggest("bot", 0, "autocorrect is ").contextCorrection);
+    }
+
+    @Test public void strongContextCanCorrectCommonWordsAcrossOneEditTypes() {
+        Counts counts = new Counts();
+        counts.put("we will ", "meet", 100000, 0);
+        counts.put("we have a ", "plain", 100000, 0);
+        counts.put("we will ", "plan", 100000, 0);
+        counts.put("came ", "from", 100000, 0);
+        // Each original is common, and the target is less common. Neither rarity nor a 20x
+        // unigram advantage should be needed when the actual contextual evidence is strong.
+        TypingCorrector english = new TypingCorrector(entries("meat", 500000, "meet", 20000,
+                "plan", 500000, "plain", 20000, "plant", 500000,
+                "form", 500000, "from", 20000), false, counts);
+        assertExactContextCorrection(english, "we will ", "meat", "meet"); // Nonadjacent key.
+        assertExactContextCorrection(english, "we have a ", "plan", "plain"); // Missing letter.
+        assertExactContextCorrection(english, "we will ", "plant", "plan"); // Extra letter.
+        assertExactContextCorrection(english, "came ", "form", "from"); // Transposition.
+    }
+
+    @Test public void exactWordAlternativesRemainVisibleWithoutAutomaticConfidence() {
+        Counts counts = new Counts();
+        counts.put("weak ", "meet", 1000, 0);
+        TypingCorrector english = new TypingCorrector(entries("meat", 500000, "meet", 20000),
+                false, counts);
+        TypingCorrector.Result result = english.suggest("meat", 5, "weak ");
+        assertEquals(Arrays.asList("meat", "meet"), result.candidates);
+        assertTrue(result.exactWord);
+        assertNull(result.contextCorrection);
+        assertNull(result.correction);
+        assertNull(result.bestSuggestion);
+
+        // The original remains first, and a missing model or missing evidence cannot trigger
+        // automatic replacement even when a competing word is far more frequent.
+        TypingCorrector frequentTarget = new TypingCorrector(entries("meat", 1, "meet", 2000000),
+                false, counts);
+        assertNull(frequentTarget.suggest("meat", 5, "missing ").contextCorrection);
+        assertNull(frequentTarget.suggest("meat", 5).contextCorrection);
+        assertTrue(frequentTarget.suggest("meat", 5, "missing ").candidates.contains("meet"));
+    }
+
+    @Test public void exactWordReplacementRequiresClearWinnerAndRespectsKnownOriginalTrigram() {
+        Counts counts = new Counts();
+        counts.put("ambiguous ", "meet", 100000, 0);
+        counts.put("ambiguous ", "seat", 90000, 0);
+        counts.put("trigram ", "meet", 1000000, 0);
+        counts.put("trigram ", "meat", 0, 500);
+        TypingCorrector english = new TypingCorrector(entries("meat", 500000, "meet", 20000,
+                "seat", 20000), false, counts);
+        TypingCorrector.Result ambiguous = english.suggest("meat", 5, "ambiguous ");
+        assertTrue(ambiguous.candidates.contains("meet"));
+        assertTrue(ambiguous.candidates.contains("seat"));
+        assertNull(ambiguous.contextCorrection);
+        TypingCorrector.Result originalTrigram = english.suggest("meat", 5, "trigram ");
+        assertTrue(originalTrigram.candidates.contains("meet"));
+        assertNull(originalTrigram.contextCorrection);
     }
 
     @Test public void bundledEnglishContextHandlesRealSentencesAndSentenceBoundaries() throws Exception {
@@ -242,6 +297,15 @@ public class TypingCorrectorTest {
         assertNull(english.suggest("Bob", 5, "it is ").contextCorrection);
         assertNull(english.suggest("bot", 5, "it is. ").contextCorrection);
         assertNull(english.suggest("bot", 5, "it is\n").contextCorrection);
+        assertExactContextCorrection(english, "in ", "they", "the");
+        TypingCorrector.Result weakMeet = english.suggest("meat", 5, "I will ");
+        assertNull(weakMeet.contextCorrection);
+        assertTrue(weakMeet.candidates.contains("meet"));
+        for (String[] phrase : new String[][]{{"is ", "hot"}, {"it is ", "hot"},
+                {"the ", "bot"}, {"to ", "eat"}, {"to ", "beat"}, {"to ", "heat"},
+                {"I want ", "too"}, {"on ", "them"}, {"you ", "gave"}}) {
+            assertNull(phrase[0] + phrase[1], english.suggest(phrase[1], 5, phrase[0]).contextCorrection);
+        }
     }
 
     @Test public void contextDoesNotGuessFromWeakMissingOrConflictingEvidence() {
@@ -262,10 +326,13 @@ public class TypingCorrectorTest {
                 "different ", "missing ")) {
             assertNull(context, english.suggest("bot", 5, context).contextCorrection);
         }
-        TypingCorrector saved = new TypingCorrector(entries("bot", 944, "bot", 2000000,
-                "not", 4262273), false, counts);
+        // Saved words are protected by the controller, not by assuming the synthetic dictionary
+        // frequency itself forbids contextual correction.
+        TypingCorrector savedFrequency = new TypingCorrector(entries("meat", 2000000,
+                "meet", 1000), false, counts);
+        counts.put("very strong ", "meet", 1000000, 0);
+        assertEquals("meet", savedFrequency.suggest("meat", 5, "very strong ").contextCorrection);
         counts.put("autocorrect is ", "not", 10282, 0);
-        assertNull(saved.suggest("bot", 5, "autocorrect is ").contextCorrection);
         TypingCorrector name = new TypingCorrector(entries("Bot", 944, "not", 4262273), false, counts);
         assertNull(name.suggest("bot", 5, "autocorrect is ").contextCorrection);
     }
@@ -324,6 +391,17 @@ public class TypingCorrectorTest {
         assertEquals(typed, expected, result.candidates.get(1));
         assertEquals(typed, expected, result.correction);
         assertEquals(typed, expected, result.bestSuggestion);
+    }
+
+    private static void assertExactContextCorrection(TypingCorrector corrector, String preceding,
+                                                      String typed, String expected) {
+        TypingCorrector.Result result = corrector.suggest(typed, 5, preceding);
+        assertTrue(result.exactWord);
+        assertEquals(typed, result.candidates.get(0));
+        assertEquals(expected, result.candidates.get(1));
+        assertEquals(expected, result.contextCorrection);
+        assertNull(result.correction);
+        assertNull(result.bestSuggestion);
     }
 
     private static List<Entry> entries(Object... values) {

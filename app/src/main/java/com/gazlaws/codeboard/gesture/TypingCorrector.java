@@ -25,12 +25,20 @@ public final class TypingCorrector {
     private static final int MAX_RESULTS = 32;
     private static final double FREQUENCY_WEIGHT = 0.18;
     private static final double SHORT_WORD_FREQUENCY_WEIGHT = 1.9;
-    // Replacing a real word requires substantially more evidence than suggesting a typo.
-    private static final int MAX_CONTEXTUAL_EXACT_FREQUENCY = 5000;
-    private static final int MIN_CONTEXTUAL_TARGET_FREQUENCY = 2000;
-    private static final long MIN_CONTEXT_BIGRAM_COUNT = 1000;
-    private static final long MIN_CONTEXT_TRIGRAM_COUNT = 100;
-    private static final double CONTEXT_REPLACEMENT_RATIO = 40.0;
+    // Exact-word alternatives use the same weighted edit distance and bounded unigram prior as
+    // other spelling matches. Suggestions can use observed counts optimistically, but an automatic
+    // replacement compares against the estimated upper bound for omitted counts. In that stricter
+    // comparison a candidate must beat the unedited word by 0.55 and every other alternative
+    // by 0.40 edit-cost units. An unedited, common word has an additional bounded prior, and
+    // observed context for it provides extra protection even when its count is below the floor.
+    // A frequency advantage alone is at most 0.18, less than one edit's cost.
+    private static final double EXACT_SUGGESTION_CONTEXT_WEIGHT = 0.50;
+    private static final double EXACT_CONFIDENCE_CONTEXT_WEIGHT = 0.32;
+    private static final double EXACT_ORIGINAL_FREQUENCY_WEIGHT = 0.20;
+    private static final double EXACT_OBSERVED_ORIGINAL_WEIGHT = 0.30;
+    private static final double EXACT_MIN_ORIGINAL_MARGIN = 0.55;
+    private static final double EXACT_MIN_RUNNER_UP_MARGIN = 0.40;
+    private static final double ORIGINAL_TRIGRAM_VETO_RATIO = 4.0;
 
     /** An optional offline source of counts for words following the given preceding text. */
     public interface ContextModel {
@@ -113,6 +121,21 @@ public final class TypingCorrector {
         }
     }
 
+    private static final class ExactMatch {
+        final Match match;
+        final ContextEvidence evidence;
+        final double suggestionScore;
+        final double confidenceScore;
+
+        ExactMatch(Match match, ContextEvidence evidence, double suggestionScore,
+                   double confidenceScore) {
+            this.match = match;
+            this.evidence = evidence;
+            this.suggestionScore = suggestionScore;
+            this.confidenceScore = confidenceScore;
+        }
+    }
+
     private static final Comparator<Match> MATCH_ORDER = (a, b) -> {
         int order = Double.compare(a.score, b.score);
         if (order != 0) return order;
@@ -181,7 +204,7 @@ public final class TypingCorrector {
 
     /**
      * Suggests up to {@code limit} strings, always retaining the original typed string first.
-     * Unsupported tokens, exact dictionary words and unusually long tokens are never changed.
+     * Unsupported tokens and unusually long tokens are never changed.
      * Only positive {@code limit} values produce candidates.
      */
     public Result suggest(String typed, int limit) {
@@ -189,8 +212,8 @@ public final class TypingCorrector {
     }
 
     /**
-     * Suggests alternatives using text before the current token as optional context. Exact words
-     * stay exact; only a narrowly supported real-word typo is returned as contextCorrection.
+     * Suggests alternatives using text before the current token as optional context. A strongly
+     * supported alternative to an exact English word is returned as contextCorrection.
      * The caller must still protect explicitly saved words and editor-specific identifiers.
      */
     public Result suggest(String typed, int limit, String previousContext) {
@@ -205,10 +228,8 @@ public final class TypingCorrector {
             CaseStyle style = korean ? CaseStyle.LOWER : caseStyle(typed);
             String canonical = display(exactEntry.text, style, typed);
             if (limit > 1 && !canonical.equals(typed)) candidates.add(canonical);
-            String contextual = contextualExactCorrection(normalized, typed, style, exactEntry,
-                    previousContext);
-            if (contextual != null && candidates.size() < Math.min(limit, MAX_RESULTS)
-                    && !candidates.contains(contextual)) candidates.add(contextual);
+            String contextual = contextualExactSuggestions(normalized, typed, style, exactEntry,
+                    previousContext, candidates, Math.min(limit, MAX_RESULTS));
             return new Result(candidates, null, null, contextual, true);
         }
         if (normalized == null || normalized.length() > MAX_INPUT_LENGTH) {
@@ -291,73 +312,82 @@ public final class TypingCorrector {
         });
     }
 
-    private String contextualExactCorrection(String normalized, String typed, CaseStyle style,
-                                             Word exactEntry, String previousContext) {
-        // A capitalized exact entry may be a name, acronym, or a user's preferred spelling.
-        // Common exact words are also deliberately outside this narrow real-word typo path.
-        if (contextModel == null || previousContext == null || previousContext.isEmpty()
-                || style != CaseStyle.LOWER || normalized.length() < 3
-                || normalized.indexOf('\'') >= 0 || exactEntry.frequency > MAX_CONTEXTUAL_EXACT_FREQUENCY
+    private String contextualExactSuggestions(String normalized, String typed, CaseStyle style,
+                                               Word exactEntry, String previousContext,
+                                               List<String> candidates, int limit) {
+        // Capitalized entries may be names, acronyms, or a user's preferred spelling. The caller
+        // additionally protects explicitly saved words, even when they have lowercase spellings.
+        if (korean || style != CaseStyle.LOWER || normalized.length() < 3
+                || normalized.indexOf('\'') >= 0
                 || !exactEntry.text.equals(exactEntry.text.toLowerCase(Locale.ROOT))) return null;
-        PreparedContext prepared = contextModel.prepare(previousContext);
-        if (prepared == null) return null;
-        ContextEvidence original = prepared.score(normalized);
-        if (original == null) original = new ContextEvidence(0, 0);
-        long originalBigram = observedOrOmitted(original.bigramCount,
-                contextModel.bigramOmittedUpperBound());
-        long originalTrigram = observedOrOmitted(original.trigramCount,
-                contextModel.trigramOmittedUpperBound());
 
-        Match best = null;
-        long bestCount = 0;
-        long nextCount = 0;
-        boolean bestUsesTrigram = false;
-        for (Match candidate : findMatches(exactEntry.keys, 1)) {
-            if (candidate.edits != 1 || !adjacentSubstitution(exactEntry.keys, candidate.word.keys)
-                    || candidate.word.frequency < MIN_CONTEXTUAL_TARGET_FREQUENCY
-                    || (long) candidate.word.frequency < 20L * Math.max(1, exactEntry.frequency)) continue;
-            ContextEvidence evidence = prepared.score(normalize(candidate.word.text, false));
-            if (evidence == null) continue;
-            // A known preceding phrase favoring the original word vetoes a broader bigram.
-            if (original.trigramCount > 0 && (evidence.trigramCount == 0
-                    || evidence.trigramCount < 4.0 * original.trigramCount)) continue;
-            boolean strongTrigram = evidence.trigramCount >= MIN_CONTEXT_TRIGRAM_COUNT
-                    && evidence.trigramCount >= CONTEXT_REPLACEMENT_RATIO * originalTrigram;
-            boolean strongBigram = evidence.bigramCount >= MIN_CONTEXT_BIGRAM_COUNT
-                    && evidence.bigramCount >= CONTEXT_REPLACEMENT_RATIO * originalBigram;
-            if (!strongBigram && !strongTrigram) continue;
-            // Compare like-for-like counts. Prefer a candidate supported by a strong trigram,
-            // otherwise compare bigrams from the same source and preceding word.
-            long count = strongTrigram ? evidence.trigramCount : evidence.bigramCount;
-            if (best == null || (strongTrigram && !bestUsesTrigram)
-                    || (strongTrigram == bestUsesTrigram && count > bestCount)) {
-                nextCount = strongTrigram == bestUsesTrigram ? bestCount : 0;
-                best = candidate;
-                bestCount = count;
-                bestUsesTrigram = strongTrigram;
-            } else if (strongTrigram == bestUsesTrigram) nextCount = Math.max(nextCount, count);
+        PreparedContext prepared = contextModel == null || previousContext == null
+                || previousContext.isEmpty() ? null : contextModel.prepare(previousContext);
+        long bigramFloor = contextModel == null ? Long.MAX_VALUE
+                : Math.max(1, contextModel.bigramOmittedUpperBound());
+        long trigramFloor = contextModel == null ? Long.MAX_VALUE
+                : Math.max(1, contextModel.trigramOmittedUpperBound());
+        ArrayList<ExactMatch> ranked = new ArrayList<>();
+        ExactMatch original = null;
+        for (Match match : findMatches(exactEntry.keys, 1)) {
+            ContextEvidence evidence = prepared == null ? null
+                    : prepared.score(normalize(match.word.text, false));
+            if (evidence == null) evidence = new ContextEvidence(0, 0);
+            // Bigram and trigram are alternative views of the same context, not independent
+            // observations. Taking the maximum avoids inflating a weak trigram with a bigram.
+            double suggestionBonus = EXACT_SUGGESTION_CONTEXT_WEIGHT * Math.max(
+                    Math.log1p((double) evidence.bigramCount / bigramFloor),
+                    Math.log1p((double) evidence.trigramCount / trigramFloor));
+            double confidenceBonus = EXACT_CONFIDENCE_CONTEXT_WEIGHT * Math.max(
+                    conservativeContextSignal(evidence.bigramCount, bigramFloor),
+                    conservativeContextSignal(evidence.trigramCount, trigramFloor));
+            ExactMatch scored = new ExactMatch(match, evidence, match.score - suggestionBonus,
+                    match.score - confidenceBonus);
+            if (match.edits == 0) original = scored;
+            else ranked.add(scored);
         }
-        if (best == null || (nextCount > 0 && bestCount < 5.0 * nextCount)) return null;
-        return display(best.word.text, style, typed);
+        Collections.sort(ranked, (a, b) -> {
+            int order = Double.compare(a.suggestionScore, b.suggestionScore);
+            return order != 0 ? order : MATCH_ORDER.compare(a.match, b.match);
+        });
+        for (ExactMatch match : ranked) {
+            if (candidates.size() >= limit) break;
+            String shown = display(match.match.word.text, style, typed);
+            if (!shown.equals(typed) && !candidates.contains(shown)) candidates.add(shown);
+        }
+
+        if (prepared == null || original == null || ranked.isEmpty()) return null;
+        ExactMatch best = ranked.get(0);
+        // A specific known phrase favoring the original vetoes a broader bigram. Counts of zero
+        // mean missing data, so a candidate without a matching trigram cannot defeat that phrase.
+        if (original.evidence.trigramCount > 0
+                && best.evidence.trigramCount < ORIGINAL_TRIGRAM_VETO_RATIO
+                * original.evidence.trigramCount) return null;
+        double originalProtection = EXACT_ORIGINAL_FREQUENCY_WEIGHT
+                * Math.log1p(exactEntry.frequency) / frequencyScale;
+        originalProtection += EXACT_OBSERVED_ORIGINAL_WEIGHT * Math.max(
+                observedContextSupport(original.evidence.bigramCount, bigramFloor),
+                observedContextSupport(original.evidence.trigramCount, trigramFloor));
+        if (original.confidenceScore - originalProtection - best.confidenceScore
+                < EXACT_MIN_ORIGINAL_MARGIN) return null;
+        for (int i = 1; i < ranked.size(); i++) {
+            if (ranked.get(i).confidenceScore - best.confidenceScore
+                    < EXACT_MIN_RUNNER_UP_MARGIN) return null;
+        }
+        return display(best.match.word.text, style, typed);
     }
 
-    private static long observedOrOmitted(long observed, long omittedUpperBound) {
-        return Math.max(Math.max(1, observed), omittedUpperBound);
+    private static double conservativeContextSignal(long count, long omittedUpperBound) {
+        return count <= omittedUpperBound ? 0 : Math.log((double) count / omittedUpperBound);
+    }
+
+    private static double observedContextSupport(long count, long omittedUpperBound) {
+        return Math.min(1.0, Math.log1p(count) / Math.log1p(omittedUpperBound));
     }
 
     private static double contextBonus(long count, long omittedUpperBound) {
         long floor = Math.max(1, omittedUpperBound);
         return count <= floor ? 0 : 0.1 * Math.log((double) count / floor);
-    }
-
-    private static boolean adjacentSubstitution(String a, String b) {
-        if (a.length() != b.length()) return false;
-        int changed = 0;
-        for (int i = 0; i < a.length(); i++) {
-            if (a.charAt(i) == b.charAt(i)) continue;
-            if (++changed > 1 || substitutionCost(a.charAt(i), b.charAt(i)) >= 1.0) return false;
-        }
-        return changed == 1;
     }
 
     private String topSuggestion(String normalized, String typed, CaseStyle style,
