@@ -12,8 +12,13 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
+import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.text.util.Linkify;
+import android.text.method.LinkMovementMethod;
 
 import androidx.annotation.ColorInt;
 import androidx.annotation.NonNull;
@@ -23,6 +28,7 @@ import androidx.preference.ListPreference;
 import androidx.preference.Preference;
 import androidx.preference.PreferenceFragmentCompat;
 
+import com.gazlaws.codeboard.gesture.PersonalDictionary;
 import com.gazlaws.codeboard.theme.IOnFocusListenable;
 import com.gazlaws.codeboard.theme.ThemeDefinitions;
 import com.gazlaws.codeboard.theme.ThemeInfo;
@@ -30,6 +36,12 @@ import com.gazlaws.codeboard.theme.ThemeInfo;
 //import com.pes.androidmaterialcolorpickerdialog.ColorPickerCallback;
 import com.github.evilbunny2008.androidmaterialcolorpickerdialog.ColorPicker;
 import com.github.evilbunny2008.androidmaterialcolorpickerdialog.ColorPickerCallback;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static android.provider.Settings.Secure.DEFAULT_INPUT_METHOD;
 
@@ -119,6 +131,23 @@ public class SettingsFragment extends PreferenceFragmentCompat implements IOnFoc
             return false;
         }
         switch (preference.getKey()) {
+            case "clear_typing_learning":
+                new AlertDialog.Builder(requireActivity()).setTitle("Clear learned typing?")
+                        .setMessage("This resets automatic learning and tap calibration. Your manually added dictionary words are kept.")
+                        .setPositiveButton("Clear", (dialog, which) -> {
+                            new com.gazlaws.codeboard.gesture.AdaptiveTypingModel(requireContext()).clear();
+                            new com.gazlaws.codeboard.gesture.TouchModel(requireContext()).clear();
+                        }).setNegativeButton("Cancel", null).show();
+                return true;
+            case "typing_benchmark":
+                startActivity(new Intent(requireActivity(), TypingBenchmarkActivity.class));
+                return true;
+            case "personal_dictionary":
+                showPersonalDictionary();
+                return true;
+            case "swipe_dictionary_credits":
+                showSwipeDictionaryCredits();
+                return true;
             case "change_keyboard":
                 InputMethodManager imm = (InputMethodManager)
                         requireActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
@@ -159,6 +188,100 @@ public class SettingsFragment extends PreferenceFragmentCompat implements IOnFoc
                     public void onClick(DialogInterface dialogInterface, int i) {
                     }
                 })
+                .show();
+    }
+
+    private void showSwipeDictionaryCredits() {
+        StringBuilder credits = new StringBuilder();
+        try {
+            for (String asset : new String[] {"swipe/NOTICE.md", "swipe/CONTEXT-NOTICE.md",
+                    "swipe/LICENSE-CC-BY-SA-4.0.txt", "swipe/LICENSE-CC-BY-4.0.txt",
+                    "swipe/LICENSE-CC-BY-3.0.txt"}) {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                        requireContext().getAssets().open(asset), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) credits.append(line).append('\n');
+                }
+                credits.append('\n');
+            }
+        } catch (IOException e) {
+            credits.append("Unable to load the dictionary credits.");
+            Log.e("SettingsFragment", "Loading swipe dictionary credits", e);
+        }
+        AlertDialog dialog = new AlertDialog.Builder(requireContext())
+                .setTitle(R.string.swipe_dictionary_credits_title)
+                .setMessage(credits.toString())
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
+        TextView message = dialog.findViewById(android.R.id.message);
+        if (message != null) {
+            Linkify.addLinks(message, Linkify.WEB_URLS);
+            message.setMovementMethod(LinkMovementMethod.getInstance());
+        }
+    }
+
+    private void showPersonalDictionary() {
+        PersonalDictionary dictionary = new PersonalDictionary(requireContext());
+        List<String> words = dictionary.getWords();
+        AlertDialog.Builder builder = new AlertDialog.Builder(requireContext())
+                .setTitle(R.string.personal_dictionary_title)
+                .setPositiveButton(R.string.personal_dictionary_add, (dialog, which) -> showAddPersonalWord())
+                .setNegativeButton(R.string.personal_dictionary_done, null);
+        if (words.isEmpty()) {
+            builder.setMessage(R.string.personal_dictionary_empty);
+        } else {
+            builder.setTitle(R.string.personal_dictionary_words_title);
+            builder.setItems(words.toArray(new String[0]), (dialog, which) ->
+                    showRemovePersonalWord(words.get(which)));
+        }
+        builder.show();
+    }
+
+    private void showAddPersonalWord() {
+        EditText input = new EditText(requireContext());
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        input.setHint(R.string.personal_dictionary_word_hint);
+        LinearLayout container = new LinearLayout(requireContext());
+        int padding = (int) (24 * getResources().getDisplayMetrics().density + 0.5f);
+        container.setPadding(padding, 0, padding, 0);
+        container.addView(input, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        AlertDialog dialog = new AlertDialog.Builder(requireContext())
+                .setTitle(R.string.personal_dictionary_add)
+                .setMessage(R.string.personal_dictionary_add_help)
+                .setView(container)
+                .setPositiveButton(R.string.personal_dictionary_add_button, null)
+                .setNegativeButton(android.R.string.cancel, (dismissed, which) -> showPersonalDictionary())
+                .setOnCancelListener(dismissed -> showPersonalDictionary())
+                .create();
+        dialog.setOnShowListener(shown -> dialog.getButton(DialogInterface.BUTTON_POSITIVE)
+                .setOnClickListener(view -> {
+                    try {
+                        if (!new PersonalDictionary(requireContext()).addWord(input.getText().toString())) {
+                            input.setError(getString(R.string.personal_dictionary_duplicate));
+                            return;
+                        }
+                        dialog.dismiss();
+                        showPersonalDictionary();
+                    } catch (IllegalArgumentException error) {
+                        input.setError(error.getMessage());
+                    }
+                }));
+        dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        dialog.show();
+        input.requestFocus();
+    }
+
+    private void showRemovePersonalWord(String word) {
+        new AlertDialog.Builder(requireContext())
+                .setTitle(getString(R.string.personal_dictionary_remove_title, word))
+                .setPositiveButton(R.string.personal_dictionary_remove, (dialog, which) -> {
+                    new PersonalDictionary(requireContext()).removeWord(word);
+                    showPersonalDictionary();
+                })
+                .setNegativeButton(android.R.string.cancel, (dialog, which) -> showPersonalDictionary())
+                .setOnCancelListener(dialog -> showPersonalDictionary())
                 .show();
     }
 

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="swipe_typing_title">Swipe typing</string>
+    <string name="swipe_typing_summary">Glide across letters to type English or Korean words</string>
+    <string name="swipe_dictionary_credits_title">Swipe dictionary credits</string>
+    <string name="swipe_dictionary_credits_summary">Word list sources and license</string>
+</resources>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spelling_suggestions_disabled_hint">Spelling suggestions are off in keyboard settings</string>
+    <string name="spelling_suggestions_unavailable_hint">Spelling suggestions are unavailable in this field</string>
+    <string name="swipe_and_type_suggestions_hint">Swipe or type for suggestions</string>
+    <string name="type_suggestions_hint">Type for suggestions</string>
+</resources>

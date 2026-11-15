@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="auto_correction_title">Autocorrect</string>
+    <string name="auto_correction_summary">Automatically replace likely typos on Space. Backspace undoes the correction.</string>
+    <string name="spelling_suggestions_title">Spelling suggestions</string>
+    <string name="spelling_suggestions_summary">Show spelling alternatives, word completions, next-word suggestions and Add word</string>
+    <string name="next_word_label">→ %1$s</string>
+    <string name="next_word_description">Insert next word: %1$s</string>
+</resources>

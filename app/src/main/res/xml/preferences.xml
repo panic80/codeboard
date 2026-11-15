@@ -11,6 +11,60 @@
             android:title="@string/reopen_hint" />
     </PreferenceCategory>
     <PreferenceCategory android:title="Features">
+        <SwitchPreferenceCompat android:key="adaptive_learning" android:defaultValue="true"
+            android:title="Learn from my typing" android:summary="Learn words, phrases and corrections on this device. New words need three uses or an explicit choice." />
+        <SwitchPreferenceCompat android:key="adaptive_touch" android:defaultValue="true"
+            android:title="Adapt to my taps" android:summary="Use tap positions and confirmed spellings to improve suggestions for each keyboard size." />
+        <SwitchPreferenceCompat android:key="chat_spacing" android:defaultValue="false"
+            android:title="Chat punctuation repair" android:summary="Review text can suggest spaces for semicolons between words. Leave off for coding." />
+        <Preference android:key="clear_typing_learning" android:title="Clear learned typing"
+            android:summary="Reset learned words, phrases, rejected corrections and tap calibration. Manually added words are kept." />
+        <Preference android:key="typing_benchmark" android:title="Typing accuracy test"
+            android:summary="Measure English or Korean typing errors and speed on your phone." />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/use_top_suggestion"
+            android:dependency="auto_correction"
+            android:key="use_top_suggestion"
+            android:title="@string/use_top_suggestion_title"
+            android:summary="@string/use_top_suggestion_summary" />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/auto_capitalization"
+            android:key="auto_capitalization"
+            android:title="@string/auto_capitalization_title"
+            android:summary="@string/auto_capitalization_summary" />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/double_space_period"
+            android:key="double_space_period"
+            android:title="@string/double_space_period_title"
+            android:summary="@string/double_space_period_summary" />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/cursor_control"
+            android:key="cursor_control"
+            android:title="@string/cursor_control_title"
+            android:summary="@string/cursor_control_summary" />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/spelling_suggestions"
+            android:key="spelling_suggestions"
+            android:title="@string/spelling_suggestions_title"
+            android:summary="@string/spelling_suggestions_summary" />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/auto_correction"
+            android:key="auto_correction"
+            android:title="@string/auto_correction_title"
+            android:summary="@string/auto_correction_summary" />
+        <Preference
+            android:key="personal_dictionary"
+            android:title="@string/personal_dictionary_title"
+            android:summary="@string/personal_dictionary_summary" />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/swipe_typing"
+            android:key="swipe_typing"
+            android:title="@string/swipe_typing_title"
+            android:summary="@string/swipe_typing_summary" />
+        <Preference
+            android:key="swipe_dictionary_credits"
+            android:title="@string/swipe_dictionary_credits_title"
+            android:summary="@string/swipe_dictionary_credits_summary" />
         <SwitchPreferenceCompat
             android:defaultValue="@bool/sound"
             android:key="sound"

@@ -3,10 +3,17 @@ package com.gazlaws.codeboard.layout;
 import android.content.Context;
 
 import com.gazlaws.codeboard.R;
+import com.gazlaws.codeboard.input.KoreanKeyMap;
 import com.gazlaws.codeboard.layout.builder.KeyboardLayoutBuilder;
 
 public class Definitions {
     private Context context;
+    public static final int LAYOUT_KOREAN = 4;
+    public static final int CODE_LANGUAGE_SWITCH = -24;
+    public static final int CODE_RESIZE = -25;
+    public static final int CODE_TOOLS = -26;
+    public static final int CODE_CURSOR_DRAG_START = -27;
+    public static final int CODE_CURSOR_DRAG_END = -28;
     private static final int CODE_ESCAPE = -2;
     private static final int CODE_SYMBOLS = -1;
 
@@ -27,6 +34,7 @@ public class Definitions {
                 .addKey(context.getDrawable(R.drawable.ic_keyboard_arrow_up_24dp), CODE_ARROW_UP).asRepeatable()
                 .addKey(context.getDrawable(R.drawable.ic_keyboard_arrow_right_24dp), CODE_ARROW_RIGHT).asRepeatable()
                 .addKey("SYM", CODE_SYMBOLS).onCtrlShow("CLIP")
+                .addKey(context.getString(R.string.keyboard_tools_key), CODE_TOOLS)
         ;
     }
 
@@ -39,6 +47,7 @@ public class Definitions {
                 .addKey(context.getDrawable(R.drawable.ic_copy_24dp), 53739)
                 .addKey(context.getDrawable(R.drawable.ic_paste_24dp), 53740)
                 .addKey("SYM", CODE_SYMBOLS).onCtrlShow("CLIP")
+                .addKey(context.getString(R.string.keyboard_tools_key), CODE_TOOLS)
         ;
     }
 
@@ -83,6 +92,41 @@ public class Definitions {
                 .addKey('m').onShiftUppercase()
                 .addBackspaceKey()
         ;
+    }
+
+    /** Two-set Korean layout, with encoded QWERTY positions for input mapping and shortcuts. */
+    public static void addKoreanRows(KeyboardLayoutBuilder keyboard) {
+        keyboard.newRow()
+                .addKey("ㅂ", KoreanKeyMap.keyCodeFor('q')).onShiftShow("ㅃ")
+                .addKey("ㅈ", KoreanKeyMap.keyCodeFor('w')).onShiftShow("ㅉ")
+                .addKey("ㄷ", KoreanKeyMap.keyCodeFor('e')).onShiftShow("ㄸ")
+                .addKey("ㄱ", KoreanKeyMap.keyCodeFor('r')).onShiftShow("ㄲ")
+                .addKey("ㅅ", KoreanKeyMap.keyCodeFor('t')).onShiftShow("ㅆ")
+                .addKey("ㅛ", KoreanKeyMap.keyCodeFor('y'))
+                .addKey("ㅕ", KoreanKeyMap.keyCodeFor('u'))
+                .addKey("ㅑ", KoreanKeyMap.keyCodeFor('i'))
+                .addKey("ㅐ", KoreanKeyMap.keyCodeFor('o')).onShiftShow("ㅒ")
+                .addKey("ㅔ", KoreanKeyMap.keyCodeFor('p')).onShiftShow("ㅖ")
+                .newRow()
+                .addKey("ㅁ", KoreanKeyMap.keyCodeFor('a')).withSize(1.5f)
+                .addKey("ㄴ", KoreanKeyMap.keyCodeFor('s'))
+                .addKey("ㅇ", KoreanKeyMap.keyCodeFor('d'))
+                .addKey("ㄹ", KoreanKeyMap.keyCodeFor('f'))
+                .addKey("ㅎ", KoreanKeyMap.keyCodeFor('g'))
+                .addKey("ㅗ", KoreanKeyMap.keyCodeFor('h'))
+                .addKey("ㅓ", KoreanKeyMap.keyCodeFor('j'))
+                .addKey("ㅏ", KoreanKeyMap.keyCodeFor('k'))
+                .addKey("ㅣ", KoreanKeyMap.keyCodeFor('l')).withSize(1.5f)
+                .newRow()
+                .addShiftKey()
+                .addKey("ㅋ", KoreanKeyMap.keyCodeFor('z'))
+                .addKey("ㅌ", KoreanKeyMap.keyCodeFor('x'))
+                .addKey("ㅊ", KoreanKeyMap.keyCodeFor('c'))
+                .addKey("ㅍ", KoreanKeyMap.keyCodeFor('v'))
+                .addKey("ㅠ", KoreanKeyMap.keyCodeFor('b'))
+                .addKey("ㅜ", KoreanKeyMap.keyCodeFor('n'))
+                .addKey("ㅡ", KoreanKeyMap.keyCodeFor('m'))
+                .addBackspaceKey();
     }
 
     public static void addQwertzRows(KeyboardLayoutBuilder keyboard) {
@@ -236,9 +280,18 @@ public class Definitions {
     }
 
     public void addCustomSpaceRow(KeyboardLayoutBuilder keyboard, String symbols) {
+        addCustomSpaceRow(keyboard, symbols, false);
+    }
+
+    public void addCustomSpaceRow(KeyboardLayoutBuilder keyboard, String symbols,
+                                  boolean showLanguageSwitch) {
         char[] chars = symbols.toCharArray();
 
         keyboard.newRow().addKey("Ctrl", 17).asModifier().onCtrlShow("CTRL");
+
+        if (showLanguageSwitch) {
+            keyboard.addKey("한/영", CODE_LANGUAGE_SWITCH).withSize(1.3f);
+        }
 
         for (int i = 0; i < (chars.length + 1) / 2 && chars.length > 0; i++) {
             keyboard.addKey(chars[i]).withSize(.7f);

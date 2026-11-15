@@ -1,0 +1,12 @@
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="adaptive_typing.xml" />
+        <exclude domain="sharedpref" path="touch_model.xml" />
+        <exclude domain="sharedpref" path="typing_benchmark.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="adaptive_typing.xml" />
+        <exclude domain="sharedpref" path="touch_model.xml" />
+        <exclude domain="sharedpref" path="typing_benchmark.xml" />
+    </device-transfer>
+</data-extraction-rules>

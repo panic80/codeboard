@@ -18,6 +18,10 @@ public class KeyboardPreferences {
                 PreferenceManager.getDefaultSharedPreferences(contextWrapper);
     }
 
+    public boolean isLearningEnabled() { return read("adaptive_learning", true); }
+    public boolean isTouchLearningEnabled() { return read("adaptive_touch", true); }
+    public boolean isChatSpacingEnabled() { return read("chat_spacing", false); }
+
     public boolean isFirstStart() {
         return read("FIRST_START", true);
     }
@@ -29,6 +33,49 @@ public class KeyboardPreferences {
     public boolean isSoundEnabled() {
         return read("sound",
                 res.getBoolean(R.bool.sound));
+    }
+
+    public boolean isSwipeTypingEnabled() {
+        return read("swipe_typing", res.getBoolean(R.bool.swipe_typing));
+    }
+
+    public boolean isAutoCorrectEnabled() {
+        return read("auto_correction", res.getBoolean(R.bool.auto_correction));
+    }
+
+    public boolean isSpellingSuggestionsEnabled() {
+        return read("spelling_suggestions", res.getBoolean(R.bool.spelling_suggestions));
+    }
+
+    public boolean useTopSuggestion() {
+        return read("use_top_suggestion", res.getBoolean(R.bool.use_top_suggestion));
+    }
+
+    public boolean isAutoCapitalizationEnabled() {
+        return read("auto_capitalization", res.getBoolean(R.bool.auto_capitalization));
+    }
+
+    public boolean isDoubleSpacePeriodEnabled() {
+        return read("double_space_period", res.getBoolean(R.bool.double_space_period));
+    }
+
+    public boolean isCursorControlEnabled() {
+        return read("cursor_control", res.getBoolean(R.bool.cursor_control));
+    }
+
+    public int getKeyboardWidth(boolean landscape) {
+        try {
+            return Math.max(60, Math.min(100, Integer.parseInt(safeRead(
+                    landscape ? "width_landscape" : "width_portrait", "100"))));
+        } catch (NumberFormatException e) {
+            return 100;
+        }
+    }
+
+    public void setKeyboardSize(boolean landscape, int height, int width) {
+        write(landscape ? "size_landscape" : "size_portrait", String.valueOf(height));
+        write(landscape ? "width_landscape" : "width_portrait", String.valueOf(
+                Math.max(60, Math.min(100, width))));
     }
 
     public void setSoundEnabled(boolean bool) {

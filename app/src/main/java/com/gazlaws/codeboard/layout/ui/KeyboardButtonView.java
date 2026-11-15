@@ -7,10 +7,12 @@ import android.inputmethodservice.KeyboardView;
 import androidx.annotation.NonNull;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
+import android.view.ViewConfiguration;
 import android.view.ViewOutlineProvider;
 
+import com.gazlaws.codeboard.input.KoreanKeyMap;
 import com.gazlaws.codeboard.layout.Box;
+import com.gazlaws.codeboard.layout.Definitions;
 import com.gazlaws.codeboard.layout.Key;
 import com.gazlaws.codeboard.theme.UiTheme;
 
@@ -27,6 +29,17 @@ public class KeyboardButtonView extends View {
     private Timer timer;
     private String currentLabel = null;
     private boolean isPressed = false;
+    private boolean deferredPress = false;
+    private boolean cursorControlEnabled = true;
+    private boolean cursorDragging;
+    private float spaceStartX;
+    private float spaceStartY;
+    private float cursorAnchorX;
+    private final float spaceTouchSlop;
+    private final float cursorStep;
+    private static final int CURSOR_LEFT = 5000;
+    private static final int CURSOR_RIGHT = 5003;
+    private static final int MAX_CURSOR_STEPS_PER_EVENT = 8;
 
     public KeyboardButtonView(Context context, Key key, KeyboardView.OnKeyboardActionListener inputService, UiTheme uiTheme) {
         super(context);
@@ -34,20 +47,44 @@ public class KeyboardButtonView extends View {
         this.key = key;
         this.uiTheme = uiTheme;
         this.currentLabel = key.info.label;
+        this.spaceTouchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+        this.cursorStep = Math.max(1f, 20f * getResources().getDisplayMetrics().density);
         //Enable shadow
         this.setOutlineProvider(ViewOutlineProvider.BOUNDS);
     }
 
     @Override
-    public boolean onTouchEvent(MotionEvent e)
-    {
-        int action = e.getAction();
-        switch(action){
+    public boolean onTouchEvent(MotionEvent event) {
+        switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                onPress();
+                cursorDragging = false;
+                spaceStartX = cursorAnchorX = event.getX();
+                spaceStartY = event.getY();
+                if (getParent() instanceof KeyboardLayoutView)
+                    ((KeyboardLayoutView) getParent()).recordTap(this, event.getX(), event.getY());
+                beginPress(false);
+                break;
+            case MotionEvent.ACTION_MOVE:
+                if (isPressed && key.info.code == ' ' && cursorControlEnabled) {
+                    moveSpaceCursor(event);
+                }
                 break;
             case MotionEvent.ACTION_UP:
-                onRelease();
+                if (isPressed) {
+                    if (key.info.code == ' ' && cursorControlEnabled) moveSpaceCursor(event);
+                }
+                if (isPressed) {
+                    if (cursorDragging) finishCursorDrag();
+                    else {
+                        onRelease();
+                        performClick();
+                    }
+                }
+                break;
+            case MotionEvent.ACTION_POINTER_DOWN:
+            case MotionEvent.ACTION_POINTER_UP:
+            case MotionEvent.ACTION_CANCEL:
+                cancelPress();
                 break;
             default:
                 break;
@@ -56,15 +93,105 @@ public class KeyboardButtonView extends View {
     }
 
     @Override
-    public void layout(int l, int t, int r, int b) {
+    public boolean performClick() {
+        return super.performClick();
+    }
+
+    /** Enables horizontal cursor movement on the space key. */
+    public void setCursorControlEnabled(boolean enabled) {
+        if (cursorControlEnabled == enabled) return;
+        if (!enabled && cursorDragging) cancelPress();
+        cursorControlEnabled = enabled;
+    }
+
+    private void moveSpaceCursor(MotionEvent event) {
+        if (event.getPointerCount() != 1) {
+            cancelPress();
+            return;
+        }
+        float x = event.getX();
+        if (!cursorDragging) {
+            float dx = x - spaceStartX;
+            float dy = event.getY() - spaceStartY;
+            if (Math.abs(dx) < spaceTouchSlop || Math.abs(dx) <= Math.abs(dy)) return;
+            // The space's onPress started the IME's input-method-picker timer.
+            inputService.onRelease(0);
+            if (!isPressed) return;
+            cursorDragging = true;
+            inputService.onKey(Definitions.CODE_CURSOR_DRAG_START, null);
+            if (!isPressed || !cursorDragging) return;
+        }
+        int steps = (int) ((x - cursorAnchorX) / cursorStep);
+        if (steps == 0) return;
+        int boundedSteps = Math.max(-MAX_CURSOR_STEPS_PER_EVENT,
+                Math.min(MAX_CURSOR_STEPS_PER_EVENT, steps));
+        for (int i = 0; i < Math.abs(boundedSteps) && isPressed && cursorDragging; i++) {
+            inputService.onKey(boundedSteps < 0 ? CURSOR_LEFT : CURSOR_RIGHT, null);
+        }
+        // Drop excess movement rather than queueing unbounded cursor events for later moves.
+        if (steps != boundedSteps) cursorAnchorX = x;
+        else cursorAnchorX += boundedSteps * cursorStep;
+    }
+
+    private void finishCursorDrag() {
+        isPressed = false;
+        deferredPress = false;
+        cursorDragging = false;
+        stopRepeating();
+        animateRelease();
+        inputService.onKey(Definitions.CODE_CURSOR_DRAG_END, null);
+    }
+
+    /** Only the normal alphabet rows participate, not literal letters in custom rows. */
+    char swipeLetter() {
+        if (key.info.isModifier || key.info.isRepeatable || key.info.outputText != null) return 0;
+        char koreanPosition = KoreanKeyMap.qwertyKeyFor(key.info.code);
+        if (koreanPosition != 0) return koreanPosition;
+        int code = key.info.code;
+        return code >= 'a' && code <= 'z' && key.info.onShiftLabel != null ? (char) code : 0;
+    }
+
+    void measureInParent(int width, int height) {
         Box box = key.box;
-        int w = r-l;
-        int h = b-t;
-        int left = (int)(l + w * box.getLeft());
-        int right = (int)(l + w * box.getRight());
-        int top = (int)(t + h * box.getTop());
-        int bottom = (int)(t + h * box.getBottom());
-        super.layout(left, top, right, bottom);
+        int left = (int) (width * box.getLeft());
+        int right = (int) (width * box.getRight());
+        int top = (int) (height * box.getTop());
+        int bottom = (int) (height * box.getBottom());
+        measure(MeasureSpec.makeMeasureSpec(Math.max(0, right - left), MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec(Math.max(0, bottom - top), MeasureSpec.EXACTLY));
+    }
+
+    void layoutInParent(int width, int height) {
+        Box box = key.box;
+        layout((int) (width * box.getLeft()), (int) (height * box.getTop()),
+                (int) (width * box.getRight()), (int) (height * box.getBottom()));
+    }
+
+    /** Sends press feedback now, but waits to submit a character until it is known to be a tap. */
+    void beginDeferredPress() {
+        beginPress(true);
+    }
+
+    void completeDeferredPress() {
+        if (!isPressed || !deferredPress) return;
+        deferredPress = false;
+        submitKeyEvent();
+        if (isPressed) onRelease();
+        performClick();
+    }
+
+    void cancelPress() {
+        if (!isPressed) return;
+        boolean wasCursorDragging = cursorDragging;
+        isPressed = false;
+        deferredPress = false;
+        cursorDragging = false;
+        stopRepeating();
+        // A canceled space must not reach onRelease(32), which commits a space in the IME.
+        // The zero code still lets the listener clear its pending long-press timer.
+        if (wasCursorDragging) inputService.onKey(Definitions.CODE_CURSOR_DRAG_END, null);
+        else inputService.onRelease(0);
+        animateRelease();
     }
 
     @Override
@@ -77,19 +204,30 @@ public class KeyboardButtonView extends View {
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
-        autoReleaseIfPressed();
+        cancelPress();
     }
 
     @Override
     protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
         super.onVisibilityChanged(changedView, visibility);
-        autoReleaseIfPressed();
+        cancelPress();
     }
 
     private void drawButtonContent(Canvas canvas) {
-        float x = this.getWidth()/2;
-        float y = this.getHeight()/2 + uiTheme.fontHeight/3;
-        canvas.drawText(currentLabel, x, y, uiTheme.foregroundPaint);
+        float x = getWidth() / 2f;
+        float centerY = getHeight() / 2f;
+        float labelWidth = uiTheme.foregroundPaint.measureText(currentLabel);
+        float margin = uiTheme.buttonBodyPadding + 4 * getResources().getDisplayMetrics().density;
+        float availableWidth = Math.max(0, getWidth() - 2 * margin);
+        float availableHeight = Math.max(0, getHeight() - 2 * margin);
+        float labelHeight = uiTheme.foregroundPaint.descent() - uiTheme.foregroundPaint.ascent();
+        float scale = 1f;
+        if (labelWidth > 0) scale = Math.min(scale, availableWidth / labelWidth);
+        if (labelHeight > 0) scale = Math.min(scale, availableHeight / labelHeight);
+        canvas.save();
+        canvas.scale(scale, scale, x, centerY);
+        canvas.drawText(currentLabel, x, centerY + uiTheme.fontHeight / 3, uiTheme.foregroundPaint);
+        canvas.restore();
 
         if (key.info.icon != null){
             Drawable d = key.info.icon;
@@ -125,20 +263,19 @@ public class KeyboardButtonView extends View {
         canvas.drawRoundRect(left, top, right, bottom, rx, ry, uiTheme.buttonBodyPaint);
     }
 
-    private void onPress() {
+    private void beginPress(boolean deferred) {
+        if (isPressed) cancelPress();
         isPressed = true;
-//        if (key.info.code != 0){
-            inputService.onPress(key.info.code);
-//        }
-        if (key.info.isRepeatable){
-            startRepeating();
-        }
-        submitKeyEvent();
+        deferredPress = deferred;
+        inputService.onPress(key.info.code);
+        if (key.info.isRepeatable) startRepeating();
+        if (!deferred) submitKeyEvent();
         animatePress();
     }
 
     private void onRelease() {
         isPressed = false;
+        deferredPress = false;
 //      NOTE: If the arrow keys move out of the input view, the onRelease is never called
         if (key.info.code != 0){
             inputService.onRelease(key.info.code);
@@ -158,12 +295,6 @@ public class KeyboardButtonView extends View {
         }
     }
 
-    private void autoReleaseIfPressed(){
-        if (isPressed){
-            onRelease();
-        }
-    }
-
     private void stopRepeating() {
         if (timer == null){
             return;
@@ -177,11 +308,17 @@ public class KeyboardButtonView extends View {
             stopRepeating();
             return;
         }
-        timer = new Timer();
-        timer.scheduleAtFixedRate(new TimerTask() {
+        final Timer repeatTimer = new Timer();
+        timer = repeatTimer;
+        repeatTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {
-                submitKeyEvent();
+                post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isPressed && timer == repeatTimer) submitKeyEvent();
+                    }
+                });
             }
         },400, 50);
     }
